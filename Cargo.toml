@@ -1,0 +1,12 @@
+[workspace]
+
+members = [
+  "crates/moonwave_common",
+  "crates/moonwave_core",
+  "crates/moonwave_core/macros",
+  "crates/moonwave_shader",
+  "crates/moonwave_shader/macros",
+  "crates/moonwave_resources",
+  "crates/moonwave_render",
+  "crates/moonwave_util",
+]

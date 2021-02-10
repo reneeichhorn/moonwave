@@ -1,0 +1,10 @@
+[package]
+name = "moonwave_render"
+version = "0.1.0"
+authors = ["Rene Eichhorn <rene.eichhorn1@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+wgpu = "0.7"
+moonwave_common = { path = "../moonwave_common" }
+generational-arena = "0.2"

@@ -1,0 +1,18 @@
+---
+source: crates/moonwave_shader/src/test.rs
+expression: out.0
+---
+layout (location = 0) in vec3 a_position;
+layout (location = 1) in vec2 a_uv;
+layout (location = 0) out vec4 vs_node_5_output;
+void main() {
+  vec3 node_2_output = vec3(0.0000000, 1.0000000, 2.0000000);
+  vec3 node_0_position = a_position;
+  vec2 node_0_uv = a_uv;
+
+  vec3 node_4_output = node_0_position * node_2_output;
+  vec4 node_5_output = vec4(node_4_output, 1.0000000);
+  gl_Position = node_5_output;
+  vs_node_5_output = node_5_output;
+}
+
