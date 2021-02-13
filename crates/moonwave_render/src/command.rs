@@ -1,6 +1,5 @@
-use std::ops::RangeBounds;
-
 use moonwave_common::*;
+use moonwave_resources::*;
 
 pub struct CommandEncoder {
   encoder: wgpu::CommandEncoder,
@@ -14,66 +13,55 @@ impl CommandEncoder {
   }
 
   /// Copies one buffer into another
-  pub fn copy_buffer_to_buffer<T: BufferRef>(&mut self, source: &T, destination: &T, size: u64) {
+  pub fn copy_buffer_to_buffer(
+    &mut self,
+    source: &ResourceRc<Buffer>,
+    destination: &ResourceRc<Buffer>,
+    size: u64,
+  ) {
     self.copy_buffer_to_buffer_offseted(source, 0, destination, 0, size)
   }
 
   /// Copies one buffer into another
-  pub fn copy_buffer_to_buffer_offseted<T: BufferRef>(
+  pub fn copy_buffer_to_buffer_offseted(
     &mut self,
-    source: &T,
+    source: &ResourceRc<Buffer>,
     offset_source: u64,
-    destination: &T,
+    destination: &ResourceRc<Buffer>,
     offset_destination: u64,
     size: u64,
   ) {
     self.encoder.copy_buffer_to_buffer(
-      source.get_buffer(),
+      &*source.get_raw(),
       offset_source,
-      destination.get_buffer(),
+      &*destination.get_raw(),
       offset_destination,
       size,
     )
   }
 
-  pub fn create_render_pass_encoder<'a>(
-    &'a mut self,
-    builder: &'a RenderPassCommandEncoderBuilder,
-  ) -> RenderPassCommandEncoder<'a> {
-    let render_pass = self.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-      label: Some(builder.name.as_str()),
-      color_attachments: &builder
-        .outputs
-        .iter()
-        .map(|output| wgpu::RenderPassColorAttachmentDescriptor {
-          resolve_target: None,
-          attachment: output.0.get_texture_view(),
-          ops: wgpu::Operations {
-            store: true,
-            load: wgpu::LoadOp::Clear(get_wgpu_color_rgb(output.1)),
-          },
-        })
-        .collect::<Vec<_>>(),
-      depth_stencil_attachment: builder.depth.as_ref().map(|depth| {
-        wgpu::RenderPassDepthStencilAttachmentDescriptor {
-          attachment: depth.get_texture_view(),
-          depth_ops: Some(wgpu::Operations {
-            store: true,
-            load: wgpu::LoadOp::Clear(0.0),
-          }),
-          stencil_ops: None,
-        }
-      }),
-    });
+  /// Creates a new render pass encoder.
+  pub fn create_render_pass_encoder(
+    &mut self,
+    builder: RenderPassCommandEncoderBuilder,
+  ) -> RenderPassCommandEncoder {
+    RenderPassCommandEncoder {
+      builder,
+      encoder: &mut self.encoder,
+      _commands: Vec::new(),
+    }
+  }
 
-    RenderPassCommandEncoder { render_pass }
+  /// Stops all recording and builds a new command buffer.
+  pub fn finish(self) -> wgpu::CommandBuffer {
+    self.encoder.finish()
   }
 }
 
 pub struct RenderPassCommandEncoderBuilder {
   name: String,
-  outputs: Vec<(Box<dyn TextureViewRef>, ColorRGB32)>,
-  depth: Option<Box<dyn TextureViewRef>>,
+  outputs: Vec<(ResourceRc<TextureView>, ColorRGB32)>,
+  depth: Option<ResourceRc<TextureView>>,
 }
 
 impl RenderPassCommandEncoderBuilder {
@@ -85,22 +73,13 @@ impl RenderPassCommandEncoderBuilder {
     }
   }
 
-  pub fn add_color_output<T: TextureViewRef>(&mut self, view: &T, clear: ColorRGB32) {
-    self.outputs.push((view.get_dyn(), clear));
+  pub fn add_color_output(&mut self, view: &ResourceRc<TextureView>, clear: ColorRGB32) {
+    self.outputs.push((view.clone(), clear));
   }
 
-  pub fn add_depth<T: TextureViewRef>(&mut self, view: &T) {
-    self.depth = Some(view.get_dyn());
+  pub fn add_depth(&mut self, view: &ResourceRc<TextureView>) {
+    self.depth = Some(view.clone());
   }
-}
-
-pub trait BufferRef {
-  fn get_buffer(&self) -> &wgpu::Buffer;
-}
-
-pub trait TextureViewRef: 'static {
-  fn get_texture_view(&self) -> &wgpu::TextureView;
-  fn get_dyn(&self) -> Box<dyn TextureViewRef>;
 }
 
 pub fn get_wgpu_color_rgb(color: ColorRGB32) -> wgpu::Color {
@@ -112,19 +91,53 @@ pub fn get_wgpu_color_rgb(color: ColorRGB32) -> wgpu::Color {
   }
 }
 
+pub enum RenderPassCommand {}
+
 pub struct RenderPassCommandEncoder<'a> {
-  render_pass: wgpu::RenderPass<'a>,
+  builder: RenderPassCommandEncoderBuilder,
+  encoder: &'a mut wgpu::CommandEncoder,
+  _commands: Vec<RenderPassCommand>,
 }
 
-impl<'a> RenderPassCommandEncoder<'a> {
-  pub fn set_vertex_buffer<T: BufferRef, B: RangeBounds<u64>>(
-    &mut self,
-    slot: u32,
-    buffer: &'a T,
-    bounds: B,
-  ) {
-    self
-      .render_pass
-      .set_vertex_buffer(slot, buffer.get_buffer().slice(bounds))
+impl<'a> Drop for RenderPassCommandEncoder<'a> {
+  fn drop(&mut self) {
+    let outputs = self
+      .builder
+      .outputs
+      .iter()
+      .map(|output| (output.0.get_raw(), output.1))
+      .collect::<Vec<_>>();
+
+    let depth = self.builder.depth.as_ref().map(|output| output.get_raw());
+
+    let _render_pass = self.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+      label: Some(self.builder.name.as_str()),
+      color_attachments: &outputs
+        .iter()
+        .map(|output| wgpu::RenderPassColorAttachmentDescriptor {
+          resolve_target: None,
+          attachment: &*output.0,
+          ops: wgpu::Operations {
+            store: true,
+            load: wgpu::LoadOp::Clear(get_wgpu_color_rgb(output.1)),
+          },
+        })
+        .collect::<Vec<_>>(),
+      depth_stencil_attachment: depth.as_ref().map(|depth| {
+        wgpu::RenderPassDepthStencilAttachmentDescriptor {
+          attachment: &*depth,
+          depth_ops: Some(wgpu::Operations {
+            store: true,
+            load: wgpu::LoadOp::Clear(0.0),
+          }),
+          stencil_ops: None,
+        }
+      }),
+    });
   }
 }
+
+/*
+impl<'a> RenderPassCommandEncoder<'a> {
+}
+*/

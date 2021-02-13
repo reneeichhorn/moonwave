@@ -116,7 +116,7 @@ impl Execution {
     let background_workers =
       LoadBalancedPool::new("Background Worker", background_workers_cores, false);
     let ecs_workers = LoadBalancedPool::new("ECS Worker", workers_cores, true);
-    let graph_workers = LoadBalancedPool::new("Graph Worker", workers_cores, true);
+    let graph_workers = LoadBalancedPool::new("Command Recorder", workers_cores, false);
 
     Self {
       background_workers,
@@ -173,6 +173,7 @@ impl Execution {
     block_on(self.ecs_workers.collect());
   }
 
+  /*
   pub fn block_graph(&self) {
     block_on(self.graph_workers.collect());
   }
@@ -180,9 +181,11 @@ impl Execution {
   pub fn block_main(&self) {
     self.main.collect();
   }
+  */
 
   pub fn start(&self) {
     self.background_workers.run();
+    self.graph_workers.run();
   }
 }
 

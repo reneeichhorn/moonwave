@@ -1,4 +1,5 @@
 use crate::{Core, TaskKind};
+use futures::future::join_all;
 use hecs::World as HecsWorld;
 pub use hecs::{DynamicBundle, Entity, EntityBuilder, Query, QueryBorrow};
 use std::sync::{Arc, RwLock};
@@ -41,15 +42,15 @@ impl World {
     spawns.push((entity, builder));
   }
 
-  pub(crate) fn execute(&self, core: Arc<Core>, elapsed: u64) {
+  pub(crate) fn schedule_systems(&self, core: Arc<Core>, elapsed: u64) {
     let systems = self.systems.read().unwrap();
-    for system in systems.iter().cloned() {
+    systems.iter().cloned().map(|system| {
       let cloned_core = core.clone();
-      let _ = core.schedule_task(TaskKind::ECS, async move {
+      core.schedule_task(TaskKind::ECS, async move {
         let mut sys = system.write().unwrap();
         sys.execute_system(cloned_core, elapsed);
-      });
-    }
+      })
+    });
   }
 
   pub(crate) fn handle_mutations(&mut self) {

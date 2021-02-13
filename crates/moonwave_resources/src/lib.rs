@@ -1,5 +1,8 @@
+#![allow(clippy::new_without_default)]
+
+use parking_lot::{MappedRwLockReadGuard, RwLock, RwLockReadGuard};
 use std::marker::PhantomData;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use slotmap::{DefaultKey, SlotMap};
 
@@ -10,15 +13,31 @@ struct ResourceLife {
 
 impl Drop for ResourceLife {
   fn drop(&mut self) {
-    let mut holder = self.holder.write().unwrap();
+    let mut holder = self.holder.write();
     holder.remove(self.key);
   }
 }
 
-#[derive(Clone)]
 pub struct ResourceRc<T> {
   life: Arc<ResourceLife>,
   _ty: PhantomData<T>,
+}
+
+impl<T> Clone for ResourceRc<T> {
+  fn clone(&self) -> ResourceRc<T> {
+    ResourceRc {
+      _ty: PhantomData,
+      life: self.life.clone(),
+    }
+  }
+}
+
+impl<T> ResourceRc<T> {
+  pub fn replace_with<I: IntoResource<ProxyType = T>>(&self, new_value: I) {
+    let mut holder = self.life.holder.write();
+    let value = holder.get_mut(self.life.key).unwrap();
+    *value = new_value.into();
+  }
 }
 
 pub trait IntoResource {
@@ -27,6 +46,7 @@ pub trait IntoResource {
 }
 
 pub enum Resource {
+  TextureView(wgpu::TextureView),
   Buffer(wgpu::Buffer),
   Shader(wgpu::ShaderModule),
 }
@@ -43,7 +63,7 @@ impl ResourceStorage {
   }
 
   pub fn create_proxy<T: IntoResource>(&self, resource: T) -> ResourceRc<T::ProxyType> {
-    let mut resource_slots = self.resource_slots.write().unwrap();
+    let mut resource_slots = self.resource_slots.write();
     let key = resource_slots.insert(resource.into());
     ResourceRc {
       life: Arc::new(ResourceLife {
@@ -65,9 +85,22 @@ macro_rules! make_into_resource {
         Resource::$proxy(self)
       }
     }
+
+    impl ResourceRc<$proxy> {
+      pub fn get_raw(&self) -> MappedRwLockReadGuard<wgpu::$org> {
+        let key = self.life.key.clone();
+        RwLockReadGuard::map(self.life.holder.read(), |holder| {
+          match holder.get(key).unwrap() {
+            Resource::$proxy(res) => res,
+            _ => panic!("Unexpected resource type at slot"), // Won't happen due tor
+          }
+        })
+      }
+    }
   };
 }
 make_into_resource!(Buffer, Buffer);
+make_into_resource!(TextureView, TextureView);
 make_into_resource!(Shader, ShaderModule);
 
 // Definition structures

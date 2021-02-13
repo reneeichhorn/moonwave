@@ -110,11 +110,11 @@ pub fn vertex(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // Attribute desc
     let attribute_ty = format_ident!("{}", ty.enum_type);
     attribute_descs.push(quote! {
-      moonwave_core::resources::VertexAttribute {
+      moonwave_resources::VertexAttribute {
         name: #name_str.to_string(),
         offset: #offset as u64,
         location: #index,
-        format: moonwave_core::resources::VertexAttributeFormat::#attribute_ty,
+        format: moonwave_resources::VertexAttributeFormat::#attribute_ty,
       }
     });
 
@@ -146,14 +146,14 @@ pub fn vertex(_attr: TokenStream, item: TokenStream) -> TokenStream {
         moonwave_core::bytemuck::cast_slice(slice)
       }
 
-      fn generate_attributes() -> Vec<moonwave_core::resources::VertexAttribute> {
+      fn generate_attributes() -> Vec<moonwave_resources::VertexAttribute> {
         vec![
           #(#attribute_descs),*
         ]
       }
 
-      fn generate_buffer() -> moonwave_core::resources::VertexBuffer {
-        moonwave_core::resources::VertexBuffer {
+      fn generate_buffer() -> moonwave_resources::VertexBuffer {
+        moonwave_resources::VertexBuffer {
           stride: #offset as u64,
           attributes: Self::generate_attributes(),
         }

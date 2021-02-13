@@ -7,7 +7,7 @@ mod ecs;
 mod execution;
 mod extension;
 mod logger;
-pub mod resources;
+mod nodes;
 
 pub use application::*;
 pub use base::{Core, TaskKind};

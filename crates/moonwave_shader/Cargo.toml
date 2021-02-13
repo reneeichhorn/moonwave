@@ -6,8 +6,9 @@ edition = "2018"
 
 [dependencies]
 moonwave_shader_macro = { path = "./macros" }
-moonwave_core = { path = "../moonwave_core" }
+moonwave_resources = { path = "../moonwave_resources" }
 moonwave_common = { path = "../moonwave_common" }
+moonwave_core = { path = "../moonwave_core" }
 uuid = { version = "0.8", features = ["v4"] }
 generational-arena = "0.2"
 thiserror = "1.0"

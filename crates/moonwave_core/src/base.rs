@@ -1,5 +1,7 @@
-use futures::Future;
+use futures::{executor::block_on, Future};
+use moonwave_render::{CommandEncoder, DeviceHost, FrameGraph};
 use std::{
+  pin::Pin,
   sync::{Arc, RwLock},
   time::Instant,
 };
@@ -11,11 +13,11 @@ use wgpu::{
   BufferDescriptor, Device, Queue, Surface, SwapChain, SwapChainDescriptor, SwapChainError,
 };
 
-pub use crate::resources::{Buffer, BufferUsage, ResourceRc, Shader, VertexAttribute};
 use crate::{
-  execution::Execution, resources::ResourceStorage, warn, EstimatedExecutionTime, Extension,
+  execution::Execution, nodes::PresentToScreen, warn, EstimatedExecutionTime, Extension,
   ExtensionHost, World,
 };
+use moonwave_resources::*;
 
 pub struct Core {
   device: Device,
@@ -26,6 +28,7 @@ pub struct Core {
   execution: Execution,
   resources: ResourceStorage,
   extension_host: RwLock<ExtensionHost>,
+  graph: FrameGraph,
   world: Arc<World>,
   last_frame: Instant,
 }
@@ -51,6 +54,7 @@ impl Core {
       queue,
       surface,
       execution,
+      graph: FrameGraph::new(PresentToScreen {}),
       resources: ResourceStorage::new(),
       extension_host: RwLock::new(ExtensionHost::new()),
       world: Arc::new(World::new()),
@@ -70,7 +74,7 @@ impl Core {
     self.last_frame = time;
 
     // Next frame.
-    let view = &self.swap_chain.get_current_frame()?.output.view;
+    let swap_frame = Arc::new(self.swap_chain.get_current_frame()?);
 
     // Execute extensions
     {
@@ -79,46 +83,33 @@ impl Core {
     }
 
     // Execute ecs
-    self.world.execute(arced, duration.as_millis() as u64);
-    self.execution.block_ecs();
+    {
+      optick::event!("Core::frame::ecs_barrier");
+      self
+        .world
+        .schedule_systems(arced.clone(), duration.as_millis() as u64);
+      self.execution.block_ecs();
+    }
     unsafe {
+      optick::event!("Core::frame::ecs_mutation");
       // Unsafe note: All execution in the ecs is halted at this point and is therefore safe to mutate.
       Arc::get_mut_unchecked(&mut self.world).handle_mutations();
     }
 
-    self.execution.block_graph();
-    self.execution.block_main();
-
-    // Create new command encoder
-    let mut encoder = self
-      .device
-      .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Render Encoder"),
-      });
-
-    // Create render pass
+    // Execute graph
     {
-      let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("Main Pass"),
-        color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
-          attachment: view,
-          resolve_target: None,
-          ops: wgpu::Operations {
-            load: wgpu::LoadOp::Clear(wgpu::Color {
-              r: 0.1,
-              g: 0.2,
-              b: 0.3,
-              a: 1.0,
-            }),
-            store: true,
-          },
-        }],
-        depth_stencil_attachment: None,
-      });
+      optick::event!("Core::frame::execute_graph");
+      self
+        .graph
+        .execute(swap_frame.clone(), arced.clone(), |fut| {
+          Box::pin(arced.schedule_task(TaskKind::RenderGraph, fut))
+        });
     }
 
-    // Submit command encoder
-    self.queue.submit(std::iter::once(encoder.finish()));
+    {
+      optick::event!("Core::frame::swapchain_drop");
+      drop(swap_frame);
+    }
 
     Ok(())
   }
@@ -262,4 +253,13 @@ pub enum TaskKind {
   Background,
   ECS,
   RenderGraph,
+}
+
+impl DeviceHost for Core {
+  fn get_device(&self) -> &wgpu::Device {
+    &self.device
+  }
+  fn get_queue(&self) -> &wgpu::Queue {
+    &self.queue
+  }
 }

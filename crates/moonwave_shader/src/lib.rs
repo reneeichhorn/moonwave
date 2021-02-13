@@ -1,7 +1,7 @@
 #![allow(clippy::new_without_default)]
 
 use generational_arena::{Arena, Index as ArenaIndex};
-use moonwave_core::resources::{VertexAttribute, VertexAttributeFormat, VertexBuffer};
+use moonwave_resources::*;
 use thiserror::Error;
 
 pub use moonwave_shader_macro::vertex;
