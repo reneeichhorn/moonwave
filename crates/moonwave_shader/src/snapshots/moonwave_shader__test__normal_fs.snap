@@ -1,12 +1,10 @@
 ---
 source: crates/moonwave_shader/src/test.rs
-expression: normal_out.1
+expression: fs
 ---
-layout (location = 0) out vec4 f_color;
-layout (location = 1) out vec4 f_normal;
+layout (location = 0) out vec4 f_normal;
 void main() {
-  vec4 node_3_output = vec4(1.0000000, 1.0000000, 1.0000000, 1.0000000);
-  f_normal = node_3_output;
-
+vec4 var_6_0 = vec4(1.0000000,1.0000000,1.0000000,1.0000000);
+f_normal = var_6_0;
 }
 

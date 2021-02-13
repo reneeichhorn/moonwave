@@ -1,15 +1,14 @@
 ---
 source: crates/moonwave_shader/src/test.rs
-expression: out.1
+expression: fs
 ---
-layout (location = 0) in vec4 vs_node_5_output;
+layout (location = 0) in vec4 vs_var_9_0;
 layout (location = 0) out vec4 f_color;
 layout (location = 1) out vec4 f_normal;
 void main() {
-  vec4 node_5_output = vs_node_5_output;
-  vec4 node_3_output = vec4(1.0000000, 1.0000000, 1.0000000, 1.0000000);
-  f_color = node_5_output;
-  f_normal = node_3_output;
-
+vec4 var_9_0 = vs_var_9_0;
+vec4 var_6_0 = vec4(1.0000000,1.0000000,1.0000000,1.0000000);
+f_normal = var_6_0;
+f_color = var_9_0;
 }
 

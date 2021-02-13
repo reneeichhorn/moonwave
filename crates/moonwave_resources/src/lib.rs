@@ -115,6 +115,7 @@ pub enum VertexAttributeFormat {
   UInt2,
   UInt,
 }
+#[derive(Clone)]
 pub struct VertexAttribute {
   pub name: String,
   pub offset: u64,

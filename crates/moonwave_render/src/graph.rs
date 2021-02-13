@@ -66,7 +66,7 @@ impl FrameGraph {
     let end_node = node_arena.insert(ConnectedNode {
       name: "EndNode".to_string(),
       node: Arc::new(end_node),
-      inputs: [None; 16],
+      inputs: [None; MAX_INPUT_OUTPUTS_PER_NODE],
     });
 
     Self {
@@ -95,7 +95,7 @@ impl FrameGraph {
     self.end_node = nodes.insert(ConnectedNode {
       name: "EndNode".to_string(),
       node: end_node_impl,
-      inputs: [None; 16],
+      inputs: [None; MAX_INPUT_OUTPUTS_PER_NODE],
     });
   }
 
@@ -104,7 +104,7 @@ impl FrameGraph {
     self.node_arena.write().insert(ConnectedNode {
       name: name.to_string(),
       node: Arc::new(node),
-      inputs: [None; 16],
+      inputs: [None; MAX_INPUT_OUTPUTS_PER_NODE],
     })
   }
 
@@ -117,10 +117,10 @@ impl FrameGraph {
     destination_input: usize,
   ) -> Result<(), GraphConnectError> {
     // Validate connection parameters.
-    if destination_input >= 16 {
+    if destination_input >= MAX_INPUT_OUTPUTS_PER_NODE {
       return Err(GraphConnectError::MaximumInputsReached);
     };
-    if source_output >= 16 {
+    if source_output >= MAX_INPUT_OUTPUTS_PER_NODE {
       return Err(GraphConnectError::MaximumInputsReached);
     };
 
