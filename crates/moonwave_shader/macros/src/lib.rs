@@ -1,3 +1,4 @@
+use heck::{ShoutySnakeCase, SnakeCase};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{parse_macro_input, GenericArgument, ItemStruct, Path, PathArguments, Type};
@@ -86,9 +87,9 @@ pub fn vertex(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
   // Structure attribute parsing
   let mut offset = 0;
-  let mut glsl = String::with_capacity(2048);
   let mut attribute_descs = Vec::with_capacity(item.fields.len());
   let mut shader_outputs = Vec::with_capacity(item.fields.len());
+  let mut shader_outputs_constants = Vec::with_capacity(item.fields.len());
 
   for (index, attr) in item.fields.iter().enumerate() {
     let name = attr
@@ -99,13 +100,6 @@ pub fn vertex(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let ty = path_to_glsl_type(&attr.ty)
       .unwrap_or_else(|| panic!("Unknown types can't be used within a vertex struct"));
-
-    // Glsl code
-    glsl += format!(
-      "layout (location = {}) in {} v_{};\n",
-      index, ty.glsl_type, name
-    )
-    .as_str();
 
     // Attribute desc
     let attribute_ty = format_ident!("{}", ty.enum_type);
@@ -123,6 +117,12 @@ pub fn vertex(_attr: TokenStream, item: TokenStream) -> TokenStream {
       moonwave_shader::ShaderNamedEntity::new(#name_str, moonwave_shader::ShaderEntity::Variable(moonwave_shader::ShaderEntityType::#attribute_ty))
     });
 
+    // Constants
+    let snaked = format_ident!("OUTPUT_{}", name_str.to_shouty_snake_case());
+    shader_outputs_constants.push(quote! {
+      pub const #snaked: usize = #index;
+    });
+
     offset += ty.size;
   }
 
@@ -132,16 +132,14 @@ pub fn vertex(_attr: TokenStream, item: TokenStream) -> TokenStream {
     #[derive(Copy, Clone, Debug)]
     #item
 
+    impl #struct_ident {
+      #(#shader_outputs_constants)*
+    }
+
     unsafe impl moonwave_core::bytemuck::Pod for #struct_ident {}
     unsafe impl moonwave_core::bytemuck::Zeroable for #struct_ident {}
 
     impl moonwave_shader::VertexStruct for #struct_ident {
-      /*
-      fn generate_glsl() -> String {
-        #glsl.to_string()
-      }
-      */
-
       fn generate_raw_u8(slice: &[Self]) -> &[u8] {
         moonwave_core::bytemuck::cast_slice(slice)
       }
@@ -158,16 +156,68 @@ pub fn vertex(_attr: TokenStream, item: TokenStream) -> TokenStream {
           attributes: Self::generate_attributes(),
         }
       }
+    }
+  })
+}
 
-      /*
-      fn generate_shader_node() -> moonwave_shader::ShaderNode {
-        moonwave_shader::ShaderNode {
-          inputs: vec![],
-          outputs: vec![#(#shader_outputs),*],
-          source: moonwave_shader::ShaderNodeImpl::Glsl("".to_string()),
-        }
+#[proc_macro_attribute]
+pub fn uniform(_attr: TokenStream, item: TokenStream) -> TokenStream {
+  // Parse basic structure.
+  let item = parse_macro_input!(item as ItemStruct);
+  let struct_ident = item.ident.clone();
+  let struct_name_snakecase = item.ident.to_string().to_snake_case();
+
+  // Structure attribute parsing
+  let mut attribute_descs = Vec::with_capacity(item.fields.len());
+  let mut shader_outputs_constants = Vec::with_capacity(item.fields.len());
+
+  for (index, attr) in item.fields.iter().enumerate() {
+    let name = attr
+      .ident
+      .clone()
+      .unwrap_or_else(|| panic!("All vertex struct fields must be named"));
+    let name_str = name.to_string();
+
+    let ty = path_to_glsl_type(&attr.ty)
+      .unwrap_or_else(|| panic!("Unknown types can't be used within a vertex struct"));
+
+    // Attribute desc
+    let attribute_ty = format_ident!("{}", ty.enum_type);
+    attribute_descs.push(quote! {
+      (#name_str.to_string(), moonwave_shader::ShaderType::#attribute_ty)
+    });
+
+    // Constants
+    let snaked = format_ident!("OUTPUT_{}", name_str.to_shouty_snake_case());
+    shader_outputs_constants.push(quote! {
+      pub const #snaked: usize = #index;
+    });
+  }
+
+  TokenStream::from(quote! {
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug, moonwave_shader::crevice::std140::AsStd140)]
+    #item
+
+    impl #struct_ident {
+      #(#shader_outputs_constants)*
+    }
+
+    impl UniformStruct for #struct_ident {
+      fn generate_raw_u8(&self) -> Vec<u8> {
+        use moonwave_shader::crevice::std140::{self, AsStd140};
+        self.as_std140().as_bytes().to_vec()
       }
-      */
+
+      fn generate_attributes() -> Vec<(String, moonwave_shader::ShaderType)> {
+        vec![
+          #(#attribute_descs),*
+        ]
+      }
+
+      fn generate_name() -> String {
+        #struct_name_snakecase.to_string()
+      }
     }
   })
 }

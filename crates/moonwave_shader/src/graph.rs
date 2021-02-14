@@ -2,7 +2,7 @@ use generational_arena::Arena;
 use moonwave_resources::VertexAttribute;
 use thiserror::Error;
 
-use crate::{ShaderType, VertexStruct};
+use crate::{ShaderType, UniformStruct, VertexStruct};
 
 pub use generational_arena::Index;
 
@@ -13,6 +13,7 @@ pub struct ShaderGraph {
   vertex_attributes: Vec<VertexAttribute>,
   vertex_output_node: Option<Index>,
   color_outputs: Vec<(String, ShaderType, Index)>,
+  uniforms: Vec<Uniform>,
   nodes: Arena<Node>,
 }
 
@@ -22,6 +23,7 @@ impl ShaderGraph {
       nodes: Arena::with_capacity(MAX_NODES),
       color_outputs: Vec::new(),
       vertex_attributes: Vec::new(),
+      uniforms: Vec::new(),
       vertex_output_node: None,
     }
   }
@@ -43,6 +45,20 @@ impl ShaderGraph {
     });
     self.color_outputs.push((string, format, index));
     index
+  }
+
+  pub fn add_uniform<T: UniformStruct>(&mut self) -> (usize, Index) {
+    let node = UniformNode {
+      name: T::generate_name(),
+      attributes: T::generate_attributes(),
+    };
+    let index = self.add_node(node);
+    self.uniforms.push(Uniform {
+      node_index: index,
+      name: T::generate_name(),
+      attributes: T::generate_attributes(),
+    });
+    (self.uniforms.len() - 1, index)
   }
 
   /// Add a new node into the graph.
@@ -88,7 +104,7 @@ impl ShaderGraph {
     Ok(())
   }
 
-  pub fn build(&self, outputs: &[Index]) -> (String, String) {
+  pub fn build(&self, outputs: &[Index]) -> BuiltShaderGraph {
     let mut vertex_shader_code = String::with_capacity(1024 * 1024);
     let mut fragment_shader_code = String::with_capacity(1024 * 1024);
 
@@ -101,7 +117,7 @@ impl ShaderGraph {
     };
 
     // Traverse from the starting point of each color output.
-    let traversed_fragment_shader = {
+    let mut traversed_fragment_shader = {
       optick::event!("ShaderGraph::traverse_fragment_shader");
       let mut nodes = Vec::with_capacity(MAX_NODES);
       for node in outputs {
@@ -114,6 +130,8 @@ impl ShaderGraph {
     let shared_nodes = {
       optick::event!("ShaderGraph::vs_fs_subtrees");
       let mut nodes = Vec::with_capacity(16);
+
+      // Find shared subtrees for all color outputs.
       for (_, _, node) in &self.color_outputs {
         self.traverse_subtree(
           &traversed_vertex_shader,
@@ -130,6 +148,11 @@ impl ShaderGraph {
       optick::event!("ShaderGraph::shared_attributes");
       let mut attributes = Vec::with_capacity(32);
       for node_index in &shared_nodes {
+        // Never share uniform nodes directly - uniforms can already be shared within binding easier and faster.
+        if self.uniforms.iter().any(|u| u.node_index == *node_index) {
+          continue;
+        }
+
         let node = self.nodes.get(*node_index).unwrap();
         let outputs = node.node.get_outputs();
         for (index, output_ty) in outputs.iter().enumerate() {
@@ -141,6 +164,29 @@ impl ShaderGraph {
       }
       attributes
     };
+
+    // Uniforms
+    let uniforms = self
+      .uniforms
+      .iter()
+      .enumerate()
+      .map(|(index, uniform)| BuiltUniform {
+        binding: index,
+        name: uniform.name.clone(),
+        attributes: uniform.attributes.clone(),
+        in_vs: traversed_vertex_shader.contains(&uniform.node_index),
+        in_fs: traversed_fragment_shader.contains(&uniform.node_index)
+          && !shared_nodes.contains(&uniform.node_index),
+      })
+      .collect::<Vec<_>>();
+
+    // Remove unneded uniform nodes out.
+    for (index, uniform) in uniforms.iter().enumerate() {
+      if uniform.in_fs {
+        continue;
+      }
+      traversed_fragment_shader.retain(|node| node != &self.uniforms[index].node_index);
+    }
 
     // Vertex shader.
     {
@@ -168,6 +214,14 @@ impl ShaderGraph {
         .as_str();
       }
 
+      // Uniforms
+      for uniform in &uniforms {
+        if !uniform.in_vs {
+          continue;
+        }
+        Self::generate_uniform(uniform, &mut vertex_shader_code);
+      }
+
       // Code
       vertex_shader_code += "void main() {\n";
       self.generate_code(&mut vertex_shader_code, &traversed_vertex_shader, &[]);
@@ -193,7 +247,7 @@ impl ShaderGraph {
       }
 
       // Color outputs
-      for (index, (name, ty, node_index)) in self
+      for (index, (name, ty, _)) in self
         .color_outputs
         .iter()
         .filter(|(_, _, node_index)| outputs.contains(node_index))
@@ -208,21 +262,48 @@ impl ShaderGraph {
         .as_str();
       }
 
+      // Uniforms
+      for uniform in &uniforms {
+        if !uniform.in_fs {
+          continue;
+        }
+        Self::generate_uniform(uniform, &mut fragment_shader_code);
+      }
+
       // Code
       fragment_shader_code += "void main() {\n";
       for (ty, name) in &shared_attributes {
         fragment_shader_code +=
           format!("{} {} = vs_{};\n", ty.get_glsl_type(), name, name).as_str();
       }
-      self.generate_code(
-        &mut fragment_shader_code,
-        &traversed_fragment_shader,
-        &traversed_vertex_shader,
-      );
+      let vs = traversed_vertex_shader
+        .iter()
+        .copied()
+        .filter(|it| self.uniforms.iter().find(|u| &u.node_index == it).is_none())
+        .collect::<Vec<_>>();
+      self.generate_code(&mut fragment_shader_code, &traversed_fragment_shader, &vs);
       fragment_shader_code += "}\n";
     }
 
-    (vertex_shader_code, fragment_shader_code)
+    BuiltShaderGraph {
+      vs: vertex_shader_code,
+      fs: fragment_shader_code,
+      required_uniforms: uniforms,
+    }
+  }
+
+  fn generate_uniform(uniform: &BuiltUniform, output: &mut String) {
+    *output += format!(
+      "layout (binding = {}) uniform {}_block {{\n",
+      uniform.binding, uniform.name
+    )
+    .as_str();
+
+    for attr in &uniform.attributes {
+      *output += format!("\t{} {};\n", attr.1.get_glsl_type(), attr.0).as_str();
+    }
+
+    *output += format!("}} {};\n", uniform.name).as_str();
   }
 
   fn generate_code(&self, output: &mut String, nodes: &[Index], skipped: &[Index]) {
@@ -309,6 +390,12 @@ struct Input {
   owner_node_output: usize,
 }
 
+struct Uniform {
+  node_index: Index,
+  name: String,
+  attributes: Vec<(String, ShaderType)>,
+}
+
 pub trait ShaderNode: 'static {
   fn get_available_stages(&self) -> (bool, bool) {
     (true, true)
@@ -385,6 +472,48 @@ impl ShaderNode for ColorOutputNode {
   fn generate(&self, inputs: &[Option<String>], _outputs: &[Option<String>], output: &mut String) {
     *output += format!("f_{} = {};\n", self.name, inputs[0].as_ref().unwrap()).as_str();
   }
+}
+struct UniformNode {
+  name: String,
+  attributes: Vec<(String, ShaderType)>,
+}
+impl ShaderNode for UniformNode {
+  fn get_outputs(&self) -> Vec<ShaderType> {
+    self
+      .attributes
+      .iter()
+      .map(|(_, ty)| *ty)
+      .collect::<Vec<_>>()
+  }
+
+  fn generate(&self, _inputs: &[Option<String>], outputs: &[Option<String>], output: &mut String) {
+    for (index, (name, ty)) in self.attributes.iter().enumerate() {
+      *output += format!(
+        "{} {} = {}.{};\n",
+        ty.get_glsl_type(),
+        outputs[index].as_ref().unwrap(),
+        self.name,
+        name,
+      )
+      .as_str();
+    }
+  }
+}
+
+#[derive(Debug)]
+pub struct BuiltUniform {
+  pub binding: usize,
+  name: String,
+  attributes: Vec<(String, ShaderType)>,
+  pub in_vs: bool,
+  pub in_fs: bool,
+}
+
+#[derive(Debug)]
+pub struct BuiltShaderGraph {
+  pub vs: String,
+  pub fs: String,
+  pub required_uniforms: Vec<BuiltUniform>,
 }
 
 #[derive(Error, Debug)]

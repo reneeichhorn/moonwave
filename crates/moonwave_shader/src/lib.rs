@@ -2,7 +2,9 @@
 
 use moonwave_resources::*;
 
-pub use moonwave_shader_macro::vertex;
+pub use crevice;
+pub use crevice::std140::{AsStd140, Std140};
+pub use moonwave_shader_macro::{uniform, vertex};
 
 mod base;
 mod graph;
@@ -10,6 +12,7 @@ mod graph;
 pub use base::*;
 pub use graph::*;
 
+#[cfg(test)]
 mod test;
 
 /// Describes a type available within shaders.
@@ -59,4 +62,11 @@ pub trait VertexStruct: Sized {
   fn generate_raw_u8(slice: &[Self]) -> &[u8];
   fn generate_attributes() -> Vec<VertexAttribute>;
   fn generate_buffer() -> VertexBuffer;
+}
+
+/// Describes a sized sturct that can be used as a uniform.
+pub trait UniformStruct: Sized {
+  fn generate_raw_u8(&self) -> Vec<u8>;
+  fn generate_name() -> String;
+  fn generate_attributes() -> Vec<(String, ShaderType)>;
 }

@@ -142,6 +142,8 @@ impl Core {
       .schedule_weighted_task(
         TaskKind::Background,
         async move {
+          optick::event!("Core::create_buffer");
+
           let buffer = self_cloned.device.create_buffer(&BufferDescriptor {
             label: label.as_deref(),
             mapped_at_creation,
@@ -173,6 +175,7 @@ impl Core {
       .schedule_weighted_task(
         TaskKind::Background,
         async move {
+          optick::event!("Core::create_shader");
           let mut compiler = Compiler::new().unwrap();
 
           // Compile to spir-v

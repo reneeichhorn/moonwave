@@ -9,4 +9,6 @@ members = [
   "crates/moonwave_resources",
   "crates/moonwave_render",
   "crates/moonwave_util",
+  "crates/thirdparty/crevice",
+  "crates/thirdparty/crevice-derive",
 ]

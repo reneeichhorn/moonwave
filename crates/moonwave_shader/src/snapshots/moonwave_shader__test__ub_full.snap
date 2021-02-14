@@ -1,0 +1,38 @@
+---
+source: crates/moonwave_shader/src/test.rs
+expression: built
+---
+BuiltShaderGraph {
+    vs: "layout (location = 0) in vec3 a_position;\nlayout (location = 1) in vec2 a_uv;\nlayout (location = 0) out vec4 vs_var_10_0;\nlayout (binding = 0) uniform sample_uniform_a_block {\n\tfloat sample;\n\tvec3 position;\n} sample_uniform_a;\nlayout (binding = 1) uniform sample_uniform_b_block {\n\tfloat sample;\n} sample_uniform_b;\nvoid main() {\nfloat var_5_0 = float(1.0000000);\nfloat var_4_0 = sample_uniform_b.sample;\nfloat var_3_0 = sample_uniform_a.sample;\nvec3 var_3_1 = sample_uniform_a.position;\nvar_0_0 = a_position;\nvar_0_1 = a_uv;\nvec3 var_6_0 = var_0_0 * var_3_1;\nvec3 var_7_0 = var_6_0 * var_4_0;\nvec4 var_9_0 = var_7_0[0];\nvec4 var_9_1 = var_7_0[1];\nvec4 var_9_2 = var_7_0[2];\nvec4 var_9_3 = var_7_0[3];\nvec4 var_10_0 = vec4(var_9_0,var_9_1,var_9_2,var_5_0);\ngl_Position = var_10_0;\nvs_var_10_0 = var_10_0;\n}\n",
+    fs: "layout (location = 0) in vec4 vs_var_10_0;\nlayout (location = 0) out vec4 f_color;\nlayout (binding = 1) uniform sample_uniform_b_block {\n\tfloat sample;\n} sample_uniform_b;\nvoid main() {\nvec4 var_10_0 = vs_var_10_0;\nfloat var_4_0 = sample_uniform_b.sample;\nvec3 var_8_0 = var_10_0 * var_3_0;\nf_color = var_8_0;\n}\n",
+    required_uniforms: [
+        BuiltUniform {
+            binding: 0,
+            name: "sample_uniform_a",
+            attributes: [
+                (
+                    "sample",
+                    Float,
+                ),
+                (
+                    "position",
+                    Float3,
+                ),
+            ],
+            in_vs: true,
+            in_fs: false,
+        },
+        BuiltUniform {
+            binding: 1,
+            name: "sample_uniform_b",
+            attributes: [
+                (
+                    "sample",
+                    Float,
+                ),
+            ],
+            in_vs: true,
+            in_fs: true,
+        },
+    ],
+}
