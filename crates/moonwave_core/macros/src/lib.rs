@@ -16,7 +16,7 @@ enum Item {
 impl Parse for Item {
   fn parse(input: ParseStream) -> Result<Self> {
     let lookahead = input.lookahead1();
-    if lookahead.peek(Token![struct]) {
+    if lookahead.peek(Token![struct]) || lookahead.peek(Token![pub]) {
       input.parse().map(Item::Struct)
     } else if lookahead.peek(Token![impl]) {
       input.parse().map(Item::Impl)
@@ -31,6 +31,7 @@ impl Item {
     match self {
       Item::Struct(strct) => {
         let ident = strct.ident.clone();
+        let vis = strct.vis.clone();
         let sub_ident = format_ident!("{}Actor", strct.ident.clone());
         let fields = strct.fields.iter().collect::<Vec<_>>();
         let field_names = strct
@@ -43,21 +44,24 @@ impl Item {
           #strct
 
           #[doc(hidden)]
-          struct #sub_ident {
+          #vis struct #sub_ident {
             #(#fields,)*
             ext: moonwave_core::ActorBaseExt,
           }
 
-          impl moonwave_core::IntoActor<#sub_ident> for #ident {
-            fn into_actor(self, core: std::sync::Arc<moonwave_core::Core>) -> #sub_ident {
-              #sub_ident {
+          impl moonwave_core::GenericIntoActor for #ident {
+            type Target = #sub_ident;
+
+            fn into_actor(self, core: std::sync::Arc<moonwave_core::Core>, entity: moonwave_core::Entity) -> #sub_ident {
+              let mut output = #sub_ident {
                 #(#field_names: self.#field_names,)*
-                ext: moonwave_core::ActorBaseExt::new(core),
-              }
+                ext: moonwave_core::ActorBaseExt::new(core, entity),
+              };
+              output.setup();
+              output
             }
           }
         };
-        println!("xxx {}", x);
         x
       }
       Item::Impl(im) => {
@@ -69,15 +73,20 @@ impl Item {
 
         //let mut ticks = Vec::new();
         let mut timers = Vec::new();
+        let mut spawns = Vec::new();
         let mut items = Vec::new();
 
-        for item in &im.items {
+        'outer: for item in &im.items {
           match item {
             ImplItem::Method(method) => {
               for attr in &method.attrs {
                 let name = attr.path.get_ident().unwrap().to_string();
                 #[allow(clippy::single_match)]
                 match name.as_str() {
+                  "actor_spawn" => {
+                    spawns.push(method.clone());
+                    continue 'outer;
+                  }
                   "actor_tick" => {
                     let x = attr.tokens.clone().into_iter().next().unwrap();
                     if let proc_macro2::TokenTree::Group(g) = x {
@@ -90,6 +99,10 @@ impl Item {
                   }
                   _ => {}
                 }
+              }
+
+              if method.attrs.is_empty() {
+                items.push(item.clone());
               }
             }
             _ => {
@@ -116,9 +129,20 @@ impl Item {
             }}
           });
 
-        let (optional_tick_system, optional_tick_register) = if !timers.is_empty() {
+        let spawners = spawns.iter().map(|item| {
+          let mut item = item.clone();
+          item.attrs.clear();
+          item
+        });
+        let spawner_execs = spawns.iter().map(|item| {
+          let name = item.sig.ident.clone();
+          quote! {
+            self.#name().await;
+          }
+        });
+
+        let (optional_tick_system, optional_tick_fn) = if !timers.is_empty() {
           let tick_system_ident = format_ident!("{}TickSystem", ident.clone());
-          let registered_ident = format_ident!("{}TickSystemRegistered", ident.clone());
 
           let needs_mutability = timers.iter().any(|t| t.method.needs_mutability);
           let tick_execs = timers
@@ -156,24 +180,8 @@ impl Item {
 
           (
             Some(quote! {
-              #[doc(hidden)]
-              #[allow(non_upper_case_globals)]
-              static #registered_ident: std::sync::Once = std::sync::Once::new();
-              #[doc(hidden)]
-              struct #tick_system_ident;
-
-              impl moonwave_core::System for #tick_system_ident {
-                fn execute_system(&mut self, core: std::sync::Arc<moonwave_core::Core>, elapsed: u64) {
-                  let world = core.get_world();
-                  let mut query = world.query::<(#tick_query)>();
-                  for (_entity, (actor, #tick_params)) in query.iter() {
-                    actor.tick(#tick_params elapsed);
-                  }
-                }
-              }
-
               impl #sub_ident {
-                pub fn tick(#tick_signature elapsed: u64) {
+                async fn tick_internal(&mut self, elapsed: u64) {
                   // Execute ticks.
                   #(#tick_execs)*
 
@@ -186,51 +194,55 @@ impl Item {
               }
             }),
             Some(quote! {
-              #registered_ident.call_once(|| {
-                world.add_system::<#tick_system_ident>(#tick_system_ident {});
-              });
+              self.tick_internal(elapsed).await;
             }),
           )
         } else {
           (None, None)
         };
 
-        quote! {
+        let out = quote! {
           // Tick System if used
           #optional_tick_system
 
+          // Actor implementations
+          impl #sub_ident {
+            #(#spawners)*
+
+            fn setup(&mut self) {
+              // Setup timers
+              #(#timer_setup)*
+
+              // Spawner
+              moonwave_core::block_on(async {
+                #(#spawner_execs)*
+              });
+            }
+          }
+
+          // Regulars
+          impl #ident {
+            #(#items)*
+          }
+
 
           // Actor trait implementation.
+          #[moonwave_core::async_trait]
           impl moonwave_core::Actor for #sub_ident {
-            fn get_actor_ext(&self) -> &moonwave_core::ActorBaseExt {
+            fn get_ext(&self) -> &moonwave_core::ActorBaseExt {
               &self.ext
             }
 
-            fn get_actor_ext_mut(&mut self) -> &mut moonwave_core::ActorBaseExt {
+            fn get_ext_mut(&mut self) -> &mut moonwave_core::ActorBaseExt {
               &mut self.ext
             }
 
-            fn into_raw_entity(mut self) -> moonwave_core::Entity {
-              // Setup timers.
-              #(#timer_setup)*
-
-              // Attach data to actor.
-              let world = self.ext.core.get_world().clone();
-              let entity = world.reserve();
-              self.ext.entity = entity;
-
-              // Create entity.
-              let mut builder = moonwave_core::EntityBuilder::new();
-              builder.add(self);
-              world.spawn_at(entity, builder);
-
-              // Setup system
-              #optional_tick_register
-
-              entity
+            async fn tick(&mut self, elapsed: u64) {
+              #optional_tick_fn
             }
           }
-        }
+        };
+        out
       }
     }
   }
@@ -319,5 +331,10 @@ impl Parse for TickType {
 
 #[proc_macro_attribute]
 pub fn actor_tick(_attr: TokenStream, _item: TokenStream) -> TokenStream {
+  TokenStream::new()
+}
+
+#[proc_macro_attribute]
+pub fn actor_spawn(_attr: TokenStream, _item: TokenStream) -> TokenStream {
   TokenStream::new()
 }

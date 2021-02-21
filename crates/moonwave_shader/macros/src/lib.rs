@@ -32,6 +32,11 @@ fn path_to_glsl_type(ty: &Type) -> Option<GlslType> {
     Type::Path(path) => {
       let full_path = path_to_string(&path.path);
       match full_path.as_str() {
+        "Matrix4<f32>" => Some(GlslType {
+          enum_type: "Matrix4".to_string(),
+          glsl_type: "mat4".to_string(),
+          size: 4 * 4,
+        }),
         "Vector4<f32>" => Some(GlslType {
           enum_type: "Float4".to_string(),
           glsl_type: "vec4".to_string(),
@@ -136,12 +141,12 @@ pub fn vertex(_attr: TokenStream, item: TokenStream) -> TokenStream {
       #(#shader_outputs_constants)*
     }
 
-    unsafe impl moonwave_core::bytemuck::Pod for #struct_ident {}
-    unsafe impl moonwave_core::bytemuck::Zeroable for #struct_ident {}
+    unsafe impl moonwave_common::bytemuck::Pod for #struct_ident {}
+    unsafe impl moonwave_common::bytemuck::Zeroable for #struct_ident {}
 
     impl moonwave_shader::VertexStruct for #struct_ident {
       fn generate_raw_u8(slice: &[Self]) -> &[u8] {
-        moonwave_core::bytemuck::cast_slice(slice)
+        moonwave_common::bytemuck::cast_slice(slice)
       }
 
       fn generate_attributes() -> Vec<moonwave_resources::VertexAttribute> {
@@ -196,7 +201,7 @@ pub fn uniform(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
   TokenStream::from(quote! {
     #[repr(C)]
-    #[derive(Copy, Clone, Debug, moonwave_shader::crevice::std140::AsStd140)]
+    #[derive(Copy, Clone, Debug, moonwave_shader::std140::AsStd140)]
     #item
 
     impl #struct_ident {
@@ -205,7 +210,7 @@ pub fn uniform(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     impl UniformStruct for #struct_ident {
       fn generate_raw_u8(&self) -> Vec<u8> {
-        use moonwave_shader::crevice::std140::{self, AsStd140};
+        use moonwave_shader::{AsStd140, Std140};
         self.as_std140().as_bytes().to_vec()
       }
 

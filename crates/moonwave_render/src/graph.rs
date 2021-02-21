@@ -1,11 +1,13 @@
-use crate::CommandEncoder;
+use crate::{CommandEncoder, CommandEncoderOutput};
 use futures::{executor::block_on, future::join_all, Future};
-use generational_arena::{Arena, Index};
+use generational_arena::Arena;
 use moonwave_resources::{Buffer, ResourceRc, TextureView};
 use multimap::MultiMap;
 use parking_lot::{RwLock, RwLockReadGuard};
 use std::pin::Pin;
 use std::sync::Arc;
+
+pub use generational_arena::Index;
 
 pub trait FrameGraphNode: Send + Sync + 'static {
   fn execute(
@@ -23,7 +25,7 @@ pub trait FrameGraphNode: Send + Sync + 'static {
     device: &wgpu::Device,
     _queue: &wgpu::Queue,
     _sc_frame: &wgpu::SwapChainFrame,
-  ) -> wgpu::CommandBuffer {
+  ) -> CommandEncoderOutput {
     let mut encoder = CommandEncoder::new(device, "NodeGraphEncoder");
     self.execute(inputs, outputs, &mut encoder);
     encoder.finish()
@@ -210,8 +212,8 @@ impl FrameGraph {
     scheduler: F,
   ) where
     F: Fn(
-      Pin<Box<dyn Future<Output = wgpu::CommandBuffer> + Send + Sync>>,
-    ) -> Pin<Box<dyn Future<Output = wgpu::CommandBuffer>>>,
+      Pin<Box<dyn Future<Output = CommandEncoderOutput> + Send + Sync>>,
+    ) -> Pin<Box<dyn Future<Output = CommandEncoderOutput>>>,
   {
     {
       // Gain read access to nodes and connections.
@@ -281,14 +283,18 @@ impl FrameGraph {
           futures.push(fut);
         }
 
-        let buffers = {
+        let encoder_outputs = {
           optick::event!("FrameGraph::barrier_level");
           optick::tag!("level", level as u32);
           block_on(join_all(futures))
         };
         {
-          optick::event!("FrameGraph::submt_level");
+          optick::event!("FrameGraph::submit_level");
           optick::tag!("level", level as u32);
+          let mut buffers = Vec::with_capacity(encoder_outputs.len());
+          for out in encoder_outputs {
+            buffers.push(out.command_buffer)
+          }
           device_host.get_queue().submit(buffers);
         }
       }

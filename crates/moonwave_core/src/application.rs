@@ -1,4 +1,4 @@
-use crate::{base::Core, logger::init};
+use crate::{base::Core, logger::init, GenericIntoActor};
 use std::sync::Arc;
 use wgpu::SwapChainError;
 use winit::{
@@ -16,7 +16,7 @@ pub struct Application {
 }
 
 impl Application {
-  pub fn new() -> Self {
+  pub fn new<T: GenericIntoActor>(root: T) -> Self {
     // Initialize core logging systems.
     init();
 
@@ -63,11 +63,15 @@ impl Application {
       (surface, device, queue, swap_chain, sc_desc)
     });
 
+    let mut core = Arc::new(Core::new(device, queue, swap_chain, sc_desc, surface));
+    let cloned_core = core.clone();
+    Arc::get_mut(&mut core).unwrap().setup(cloned_core, root);
+
     Self {
       event_loop: Some(event_loop),
       window,
       win_size,
-      core: Arc::new(Core::new(device, queue, swap_chain, sc_desc, surface)),
+      core,
     }
   }
 

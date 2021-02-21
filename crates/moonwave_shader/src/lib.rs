@@ -2,8 +2,11 @@
 
 use moonwave_resources::*;
 
-pub use crevice;
-pub use crevice::std140::{AsStd140, Std140};
+#[doc(hidden)]
+pub use crevice::internal;
+#[doc(hidden)]
+pub use crevice::std140::{self, AsStd140, Std140};
+
 pub use moonwave_shader_macro::{uniform, vertex};
 
 mod base;
@@ -18,6 +21,7 @@ mod test;
 /// Describes a type available within shaders.
 #[derive(Clone, Debug, Copy)]
 pub enum ShaderType {
+  Matrix4,
   Float4,
   Float3,
   Float2,
@@ -31,6 +35,7 @@ impl ShaderType {
   /// Returns the type name in GLSL.
   pub fn get_glsl_type(&self) -> &'static str {
     match self {
+      ShaderType::Matrix4 => "mat4",
       ShaderType::Float4 => "vec4",
       ShaderType::Float3 => "vec3",
       ShaderType::Float2 => "vec2",

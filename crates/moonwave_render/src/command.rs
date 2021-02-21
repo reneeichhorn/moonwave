@@ -1,15 +1,63 @@
+use std::{
+  mem::ManuallyDrop,
+  sync::Arc,
+  task::{RawWaker, RawWakerVTable, Waker},
+};
+
+use futures::Future;
 use moonwave_common::*;
 use moonwave_resources::*;
 
-pub struct CommandEncoder {
-  encoder: wgpu::CommandEncoder,
+pub struct CommandEncoderOutput {
+  pub(crate) command_buffer: wgpu::CommandBuffer,
+}
+impl CommandEncoderOutput {
+  pub fn from_raw(buffer: wgpu::CommandBuffer) -> Self {
+    Self {
+      command_buffer: buffer,
+    }
+  }
 }
 
-impl CommandEncoder {
-  pub fn new(device: &wgpu::Device, name: &str) -> Self {
+pub struct CommandEncoder<'a> {
+  encoder: wgpu::CommandEncoder,
+  device: &'a wgpu::Device,
+}
+
+impl<'a> CommandEncoder<'a> {
+  pub fn new(device: &'a wgpu::Device, name: &str) -> Self {
     let encoder =
       device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(name) });
-    Self { encoder }
+
+    Self { encoder, device }
+  }
+
+  pub fn write_buffer(&mut self, buffer: &ResourceRc<Buffer>, data: &[u8]) {
+    optick::event!("CommandEncoder::write_buffer");
+
+    // Create future
+    let fut = async {
+      let raw_buffer = buffer.get_raw();
+      let slice = raw_buffer.slice(0..);
+      slice.map_async(wgpu::MapMode::Write).await.unwrap();
+      let mut writeable = slice.get_mapped_range_mut();
+      writeable.clone_from_slice(data);
+      raw_buffer.unmap();
+    };
+
+    // Since this is executed multithreaded anyway we simply block the current thread until its ready.
+    // When the mapping is not done yet we poll the device that will continue the process on GPU.
+    let waker = waker_fn(|| {});
+    let mut ctx = std::task::Context::from_waker(&waker);
+    let mut box_fut = Box::pin(fut);
+    loop {
+      match box_fut.as_mut().poll(&mut ctx) {
+        std::task::Poll::Ready(output) => return output,
+        std::task::Poll::Pending => {
+          self.device.poll(wgpu::Maintain::Poll);
+        }
+      }
+    }
   }
 
   /// Copies one buffer into another
@@ -31,6 +79,7 @@ impl CommandEncoder {
     offset_destination: u64,
     size: u64,
   ) {
+    optick::event!("CommandEncoder::copy_buffer_to_buffer");
     self.encoder.copy_buffer_to_buffer(
       &*source.get_raw(),
       offset_source,
@@ -53,8 +102,10 @@ impl CommandEncoder {
   }
 
   /// Stops all recording and builds a new command buffer.
-  pub fn finish(self) -> wgpu::CommandBuffer {
-    self.encoder.finish()
+  pub fn finish(self) -> CommandEncoderOutput {
+    CommandEncoderOutput {
+      command_buffer: self.encoder.finish(),
+    }
   }
 }
 
@@ -141,3 +192,40 @@ impl<'a> Drop for RenderPassCommandEncoder<'a> {
 impl<'a> RenderPassCommandEncoder<'a> {
 }
 */
+
+pub fn waker_fn<F: Fn() + Send + Sync + 'static>(f: F) -> Waker {
+  let raw = Arc::into_raw(Arc::new(f)) as *const ();
+  let vtable = &Helper::<F>::VTABLE;
+  unsafe { Waker::from_raw(RawWaker::new(raw, vtable)) }
+}
+
+struct Helper<F>(F);
+
+impl<F: Fn() + Send + Sync + 'static> Helper<F> {
+  const VTABLE: RawWakerVTable = RawWakerVTable::new(
+    Self::clone_waker,
+    Self::wake,
+    Self::wake_by_ref,
+    Self::drop_waker,
+  );
+
+  unsafe fn clone_waker(ptr: *const ()) -> RawWaker {
+    let arc = ManuallyDrop::new(Arc::from_raw(ptr as *const F));
+    std::mem::forget(arc.clone());
+    RawWaker::new(ptr, &Self::VTABLE)
+  }
+
+  unsafe fn wake(ptr: *const ()) {
+    let arc = Arc::from_raw(ptr as *const F);
+    (arc)();
+  }
+
+  unsafe fn wake_by_ref(ptr: *const ()) {
+    let arc = ManuallyDrop::new(Arc::from_raw(ptr as *const F));
+    (arc)();
+  }
+
+  unsafe fn drop_waker(ptr: *const ()) {
+    drop(Arc::from_raw(ptr as *const F));
+  }
+}

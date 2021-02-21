@@ -1,4 +1,4 @@
-use moonwave_render::{FrameGraphNode, FrameNodeValue};
+use moonwave_render::{CommandEncoderOutput, FrameGraphNode, FrameNodeValue};
 pub struct PresentToScreen {}
 
 impl FrameGraphNode for PresentToScreen {
@@ -9,7 +9,7 @@ impl FrameGraphNode for PresentToScreen {
     device: &wgpu::Device,
     _queue: &wgpu::Queue,
     sc_frame: &wgpu::SwapChainFrame,
-  ) -> wgpu::CommandBuffer {
+  ) -> CommandEncoderOutput {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
       label: Some("CommandEncoderPresentToScreen"),
     });
@@ -29,6 +29,6 @@ impl FrameGraphNode for PresentToScreen {
       });
     }
 
-    encoder.finish()
+    CommandEncoderOutput::from_raw(encoder.finish())
   }
 }

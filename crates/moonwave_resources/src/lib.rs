@@ -13,6 +13,7 @@ struct ResourceLife {
 
 impl Drop for ResourceLife {
   fn drop(&mut self) {
+    optick::event!("ResourceStorage::release_resource");
     let mut holder = self.holder.write();
     holder.remove(self.key);
   }

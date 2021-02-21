@@ -1,7 +1,8 @@
 use futures::{executor::block_on, Future};
-use moonwave_render::{CommandEncoder, DeviceHost, FrameGraph};
+use moonwave_common::Vector2;
+use moonwave_render::{DeviceHost, FrameGraph};
 use std::{
-  pin::Pin,
+  marker::PhantomData,
   sync::{Arc, RwLock},
   time::Instant,
 };
@@ -15,7 +16,7 @@ use wgpu::{
 
 use crate::{
   execution::Execution, nodes::PresentToScreen, warn, EstimatedExecutionTime, Extension,
-  ExtensionHost, World,
+  ExtensionHost, GenericIntoActor, World,
 };
 use moonwave_resources::*;
 
@@ -25,12 +26,13 @@ pub struct Core {
   swap_chain: SwapChain,
   sc_desc: SwapChainDescriptor,
   surface: Surface,
-  execution: Execution,
+  pub(crate) execution: Execution,
   resources: ResourceStorage,
   extension_host: RwLock<ExtensionHost>,
   graph: FrameGraph,
-  world: Arc<World>,
+  world: Option<Arc<World>>,
   last_frame: Instant,
+  pub(crate) arced: Option<Arc<Core>>,
 }
 
 impl Core {
@@ -57,14 +59,24 @@ impl Core {
       graph: FrameGraph::new(PresentToScreen {}),
       resources: ResourceStorage::new(),
       extension_host: RwLock::new(ExtensionHost::new()),
-      world: Arc::new(World::new()),
+      world: None,
+      arced: None,
     }
+  }
+
+  pub(crate) fn setup<T: GenericIntoActor>(&mut self, arced: Arc<Self>, actor: T) {
+    self.arced = Some(arced.clone());
+    self.world = Some(Arc::new(World::new(arced, actor)));
   }
 
   pub(crate) fn recreate_swap_chain(&mut self, width: u32, height: u32) {
     self.sc_desc.width = width;
     self.sc_desc.height = height;
     self.swap_chain = self.device.create_swap_chain(&self.surface, &self.sc_desc);
+  }
+
+  pub fn get_swap_chain_size(&self) -> Vector2<u32> {
+    Vector2::new(self.sc_desc.width, self.sc_desc.height)
   }
 
   pub(crate) fn frame(&mut self, arced: Arc<Core>) -> Result<(), SwapChainError> {
@@ -84,16 +96,8 @@ impl Core {
 
     // Execute ecs
     {
-      optick::event!("Core::frame::ecs_barrier");
-      self
-        .world
-        .schedule_systems(arced.clone(), duration.as_millis() as u64);
-      self.execution.block_ecs();
-    }
-    unsafe {
-      optick::event!("Core::frame::ecs_mutation");
-      // Unsafe note: All execution in the ecs is halted at this point and is therefore safe to mutate.
-      Arc::get_mut_unchecked(&mut self.world).handle_mutations();
+      optick::event!("Core::frame::ecs_tick");
+      self.get_world().tick(duration.as_millis() as u64);
     }
 
     // Execute graph
@@ -122,12 +126,16 @@ impl Core {
 
   /// Returns the ecs systems world container.
   pub fn get_world(&self) -> &Arc<World> {
-    &self.world
+    self.world.as_ref().unwrap()
+  }
+
+  pub fn get_frame_graph(&self) -> &FrameGraph {
+    &self.graph
   }
 
   /// Creates a new memory buffer on the GPU.
   pub async fn create_buffer(
-    self: Arc<Self>,
+    &self,
     size: u64,
     mapped_at_creation: bool,
     usage: BufferUsage,
@@ -137,7 +145,7 @@ impl Core {
     let label = label.map(|l| l.to_string());
 
     // Create raw device buffer.
-    let self_cloned = self.clone();
+    let self_cloned = self.arced.as_ref().unwrap().clone();
     self
       .schedule_weighted_task(
         TaskKind::Background,
@@ -161,7 +169,7 @@ impl Core {
 
   /// Creates a raw shader from vulkan compatible glsl.
   pub async fn create_shader_from_glsl(
-    self: Arc<Self>,
+    &self,
     source: &str,
     name: &str,
     kind: ShaderKind,
@@ -169,7 +177,7 @@ impl Core {
     let source_string = source.to_string();
     let name_string = name.to_string();
     let label_string = name.to_string();
-    let self_cloned = self.clone();
+    let self_cloned = self.arced.as_ref().unwrap().clone();
 
     self
       .schedule_weighted_task(
@@ -220,7 +228,7 @@ impl Core {
     &self,
     kind: TaskKind,
     future: F,
-  ) -> impl Future<Output = F::Output>
+  ) -> impl Future<Output = F::Output> + Send + Sync + 'static
   where
     F::Output: Send + Sync + 'static,
   {
@@ -232,7 +240,7 @@ impl Core {
     kind: TaskKind,
     future: F,
     estimation: EstimatedExecutionTime,
-  ) -> std::pin::Pin<Box<dyn Future<Output = F::Output>>>
+  ) -> std::pin::Pin<Box<dyn Future<Output = F::Output> + Send + Sync + 'static>>
   where
     F::Output: Send + Sync + 'static,
   {

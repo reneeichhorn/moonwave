@@ -7,6 +7,7 @@ use async_task::Runnable;
 use core_affinity::CoreId;
 use flume::{Receiver, Sender};
 use futures::{executor::block_on, future::join_all, Future};
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use thread::Builder;
 
 /// Describes a rough estimation for an tasks execution time.
@@ -102,6 +103,7 @@ pub struct Execution {
   ecs_workers: LoadBalancedPool,
   graph_workers: LoadBalancedPool,
   main: Scheduler,
+  pub(crate) pool: ThreadPool,
 }
 
 impl Execution {
@@ -115,7 +117,7 @@ impl Execution {
     // Created load balanced pools.
     let background_workers =
       LoadBalancedPool::new("Background Worker", background_workers_cores, false);
-    let ecs_workers = LoadBalancedPool::new("ECS Worker", workers_cores, true);
+    let ecs_workers = LoadBalancedPool::new("ECS Worker", workers_cores, false);
     let graph_workers = LoadBalancedPool::new("Command Recorder", workers_cores, false);
 
     Self {
@@ -123,6 +125,13 @@ impl Execution {
       ecs_workers,
       graph_workers,
       main: Scheduler::new(),
+      pool: ThreadPoolBuilder::new()
+        .start_handler(|index| {
+          optick::register_thread(format!("ECS System Pool #{}", index + 1).as_str());
+        })
+        .num_threads(workers_cores.len())
+        .build()
+        .unwrap(),
     }
   }
 
@@ -169,9 +178,11 @@ impl Execution {
     self.main.spawn(future)
   }
 
+  /*
   pub fn block_ecs(&self) {
     block_on(self.ecs_workers.collect());
   }
+  */
 
   /*
   pub fn block_graph(&self) {
@@ -186,6 +197,7 @@ impl Execution {
   pub fn start(&self) {
     self.background_workers.run();
     self.graph_workers.run();
+    self.ecs_workers.run();
   }
 }
 

@@ -16,5 +16,7 @@ pub use execution::EstimatedExecutionTime;
 pub use extension::*;
 pub use logger::*;
 
-pub use bytemuck;
-pub use futures::Future;
+pub use async_trait::async_trait;
+pub use futures::{executor::block_on, Future};
+
+pub use moonwave_core_macro::{actor, actor_spawn, actor_tick};
