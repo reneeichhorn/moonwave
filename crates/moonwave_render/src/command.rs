@@ -1,5 +1,6 @@
 use std::{
   mem::ManuallyDrop,
+  ops::Range,
   sync::Arc,
   task::{RawWaker, RawWakerVTable, Waker},
 };
@@ -7,6 +8,7 @@ use std::{
 use futures::Future;
 use moonwave_common::*;
 use moonwave_resources::*;
+use wgpu::util::RenderEncoder;
 
 pub struct CommandEncoderOutput {
   pub(crate) command_buffer: wgpu::CommandBuffer,
@@ -97,7 +99,7 @@ impl<'a> CommandEncoder<'a> {
     RenderPassCommandEncoder {
       builder,
       encoder: &mut self.encoder,
-      _commands: Vec::new(),
+      commands: Vec::new(),
     }
   }
 
@@ -109,6 +111,7 @@ impl<'a> CommandEncoder<'a> {
   }
 }
 
+#[derive(Clone)]
 pub struct RenderPassCommandEncoderBuilder {
   name: String,
   outputs: Vec<(ResourceRc<TextureView>, ColorRGB32)>,
@@ -142,12 +145,46 @@ pub fn get_wgpu_color_rgb(color: ColorRGB32) -> wgpu::Color {
   }
 }
 
-pub enum RenderPassCommand {}
+enum RenderPassCommand {
+  SetRenderPipeline(ResourceRc<RenderPipeline>),
+  SetVertexBuffer(ResourceRc<Buffer>),
+  SetIndexBuffer(IndexFormat, ResourceRc<Buffer>),
+  SetBindGroup(u32, ResourceRc<BindGroup>),
+  RenderIndexed(Range<u32>),
+}
+
+impl RenderPassCommand {
+  fn lock(&self) -> RenderPassCommandUnlocked {
+    match self {
+      RenderPassCommand::SetRenderPipeline(a) => {
+        RenderPassCommandUnlocked::SetRenderPipeline(a.get_raw())
+      }
+      RenderPassCommand::SetVertexBuffer(a) => {
+        RenderPassCommandUnlocked::SetVertexBuffer(a.get_raw())
+      }
+      RenderPassCommand::SetIndexBuffer(a, b) => {
+        RenderPassCommandUnlocked::SetIndexBuffer(*a, b.get_raw())
+      }
+      RenderPassCommand::SetBindGroup(a, b) => {
+        RenderPassCommandUnlocked::SetBindGroup(*a, b.get_raw())
+      }
+      RenderPassCommand::RenderIndexed(a) => RenderPassCommandUnlocked::RenderIndexed(a.clone()),
+    }
+  }
+}
+
+enum RenderPassCommandUnlocked<'a> {
+  SetRenderPipeline(UnlockedResource<'a, wgpu::RenderPipeline>),
+  SetVertexBuffer(UnlockedResource<'a, wgpu::Buffer>),
+  SetIndexBuffer(IndexFormat, UnlockedResource<'a, wgpu::Buffer>),
+  SetBindGroup(u32, UnlockedResource<'a, wgpu::BindGroup>),
+  RenderIndexed(Range<u32>),
+}
 
 pub struct RenderPassCommandEncoder<'a> {
   builder: RenderPassCommandEncoderBuilder,
   encoder: &'a mut wgpu::CommandEncoder,
-  _commands: Vec<RenderPassCommand>,
+  commands: Vec<RenderPassCommand>,
 }
 
 impl<'a> Drop for RenderPassCommandEncoder<'a> {
@@ -161,7 +198,11 @@ impl<'a> Drop for RenderPassCommandEncoder<'a> {
 
     let depth = self.builder.depth.as_ref().map(|output| output.get_raw());
 
-    let _render_pass = self.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+    // Lock all resources required.
+    let commands = self.commands.iter().map(|c| c.lock()).collect::<Vec<_>>();
+
+    // Create render pass.
+    let mut rp = self.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
       label: Some(self.builder.name.as_str()),
       color_attachments: &outputs
         .iter()
@@ -185,13 +226,56 @@ impl<'a> Drop for RenderPassCommandEncoder<'a> {
         }
       }),
     });
+
+    // Execute commands.
+    for command in commands.iter() {
+      match command {
+        RenderPassCommandUnlocked::SetRenderPipeline(pipeline) => rp.set_pipeline(&*pipeline),
+        RenderPassCommandUnlocked::SetBindGroup(binding, bind) => {
+          rp.set_bind_group(*binding, &*bind, &[])
+        }
+        RenderPassCommandUnlocked::SetVertexBuffer(buffer) => {
+          rp.set_vertex_buffer(0, buffer.slice(0..))
+        }
+        RenderPassCommandUnlocked::SetIndexBuffer(format, buffer) => {
+          rp.set_index_buffer(buffer.slice(0..), *format)
+        }
+        RenderPassCommandUnlocked::RenderIndexed(range) => rp.draw_indexed(range.clone(), 0, 0..1),
+        _ => {}
+      }
+    }
   }
 }
 
-/*
 impl<'a> RenderPassCommandEncoder<'a> {
+  pub fn set_pipeline(&mut self, pipeline: ResourceRc<RenderPipeline>) {
+    self
+      .commands
+      .push(RenderPassCommand::SetRenderPipeline(pipeline));
+  }
+
+  pub fn set_vertex_buffer(&mut self, buffer: ResourceRc<Buffer>) {
+    self
+      .commands
+      .push(RenderPassCommand::SetVertexBuffer(buffer));
+  }
+
+  pub fn set_index_buffer(&mut self, buffer: ResourceRc<Buffer>, format: IndexFormat) {
+    self
+      .commands
+      .push(RenderPassCommand::SetIndexBuffer(format, buffer));
+  }
+
+  pub fn set_bind_group(&mut self, binding: u32, bind_group: ResourceRc<BindGroup>) {
+    self
+      .commands
+      .push(RenderPassCommand::SetBindGroup(binding, bind_group));
+  }
+
+  pub fn render_indexed(&mut self, range: Range<u32>) {
+    self.commands.push(RenderPassCommand::RenderIndexed(range));
+  }
 }
-*/
 
 pub fn waker_fn<F: Fn() + Send + Sync + 'static>(f: F) -> Waker {
   let raw = Arc::into_raw(Arc::new(f)) as *const ();

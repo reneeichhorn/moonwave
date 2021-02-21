@@ -208,7 +208,7 @@ pub fn uniform(_attr: TokenStream, item: TokenStream) -> TokenStream {
       #(#shader_outputs_constants)*
     }
 
-    impl UniformStruct for #struct_ident {
+    impl moonwave_shader::UniformStruct for #struct_ident {
       fn generate_raw_u8(&self) -> Vec<u8> {
         use moonwave_shader::{AsStd140, Std140};
         self.as_std140().as_bytes().to_vec()
@@ -222,6 +222,18 @@ pub fn uniform(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
       fn generate_name() -> String {
         #struct_name_snakecase.to_string()
+      }
+    }
+
+    impl moonwave_core::BindGroupLayoutSingleton for #struct_ident {
+      fn get_bind_group_lazy(core: &Core) -> moonwave_resources::ResourceRc<moonwave_resources::BindGroupLayout> {
+        static cell: moonwave_core::OnceCell<moonwave_resources::ResourceRc<moonwave_resources::BindGroupLayout>> = moonwave_core::OnceCell::new();
+        cell.get_or_init(|| {
+          let desc = moonwave_resources::BindGroupLayoutDescriptor::new()
+            .add_entry(0, moonwave_resources::BindGroupLayoutEntryType::UniformBuffer);
+          let layout = moonwave_core::block_on(core.create_bind_group_layout(desc));
+          layout
+        }).clone()
       }
     }
   })

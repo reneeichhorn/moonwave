@@ -1,7 +1,7 @@
 use crate::{CommandEncoder, CommandEncoderOutput};
 use futures::{executor::block_on, future::join_all, Future};
 use generational_arena::Arena;
-use moonwave_resources::{Buffer, ResourceRc, TextureView};
+use moonwave_resources::{BindGroup, Buffer, ResourceRc, TextureView};
 use multimap::MultiMap;
 use parking_lot::{RwLock, RwLockReadGuard};
 use std::pin::Pin;
@@ -35,7 +35,8 @@ pub trait FrameGraphNode: Send + Sync + 'static {
 #[derive(Clone)]
 pub enum FrameNodeValue {
   Buffer(ResourceRc<Buffer>),
-  Texture(ResourceRc<TextureView>),
+  BindGroup(ResourceRc<BindGroup>),
+  TextureView(ResourceRc<TextureView>),
 }
 
 const MAX_LAYERS: usize = 8;
@@ -328,3 +329,19 @@ pub trait DeviceHost: Send + Sync + 'static {
   fn get_device(&self) -> &wgpu::Device;
   fn get_queue(&self) -> &wgpu::Queue;
 }
+
+macro_rules! impl_get_node_specific {
+  ($getter:ident, $ty:ident) => {
+    impl FrameNodeValue {
+      pub fn $getter(&self) -> &ResourceRc<$ty> {
+        match self {
+          FrameNodeValue::$ty(group) => group,
+          _ => panic!("Unexpected frame node value"),
+        }
+      }
+    }
+  };
+}
+
+impl_get_node_specific!(get_bind_group, BindGroup);
+impl_get_node_specific!(get_texture_view, TextureView);

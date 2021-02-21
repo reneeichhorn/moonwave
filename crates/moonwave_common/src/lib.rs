@@ -11,7 +11,7 @@ use lazy_static::lazy_static;
 
 #[rustfmt::skip]
 lazy_static! {
-  static ref MATRIX_NORMALIZER: Matrix4<f32> = {
+  pub static ref MATRIX_NORMALIZER: Matrix4<f32> = {
     Matrix4::new(
       1.0, 0.0, 0.0, 0.0,
       0.0, 1.0, 0.0, 0.0,

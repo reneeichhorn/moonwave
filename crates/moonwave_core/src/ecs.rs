@@ -3,13 +3,13 @@ use async_std::sync::{RwLock as AsyncRwLock, RwLockWriteGuard as AsyncRwLockWrit
 use async_trait::async_trait;
 use futures::{executor::block_on, future::join_all, Future};
 use itertools::Itertools;
-pub use legion::Entity;
 use legion::{
   storage::{Component, ComponentTypeId, PackedStorage},
   systems::{CommandBuffer, ParallelRunnable, ResourceTypeId, Runnable, SystemId, UnsafeResources},
   world::{ArchetypeAccess, Entry, EntryMut, WorldId},
   EntityStore, Resources, Schedule, World as LegionWorld, WorldOptions,
 };
+pub use legion::{system, Entity};
 use owning_ref::{OwningRef, OwningRefMut};
 use parking_lot::RwLock;
 use rayon::ThreadPool;
@@ -468,7 +468,7 @@ pub trait WorldScheduler {
   fn schedule_bg(&self, task: TraitFuture) -> TraitFuture;
 }
 
-pub struct WrappedSystem(Box<dyn ParallelRunnable>);
+pub struct WrappedSystem(pub Box<dyn ParallelRunnable>);
 impl Runnable for WrappedSystem {
   fn accesses_archetypes(&self) -> &ArchetypeAccess {
     self.0.accesses_archetypes()
@@ -502,6 +502,8 @@ pub enum SystemStage {
   Cold,
   /// Application level logic for any non-engine systems or system without order dependence.
   Application(u8),
+  /// The rendering prep stage is used for system that are required right before the rendering onto the screen.
+  RenderingPreperations,
   /// The rendering stage is executed after the application changed their actors / uniforms / buffers etc. and is ready to be rendered.
   Rendering,
 }
@@ -510,7 +512,8 @@ impl SystemStage {
     match self {
       SystemStage::Cold => 0,
       SystemStage::Application(i) => *i as usize + 1,
-      SystemStage::Rendering => u8::MAX as usize + 2,
+      SystemStage::RenderingPreperations => u8::MAX as usize + 2,
+      SystemStage::Rendering => u8::MAX as usize + 3,
     }
   }
 }

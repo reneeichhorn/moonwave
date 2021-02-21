@@ -11,3 +11,4 @@ moonwave_common = { path = "../moonwave_common" }
 moonwave_resources = { path = "../moonwave_resources" }
 moonwave_shader = { path = "../moonwave_shader" }
 moonwave_render = { path = "../moonwave_render" }
+legion = "0.3"

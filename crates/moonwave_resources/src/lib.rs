@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use slotmap::{DefaultKey, SlotMap};
 
+pub use wgpu::{IndexFormat, TextureFormat, TextureUsage};
+
 struct ResourceLife {
   holder: Arc<RwLock<SlotMap<DefaultKey, Resource>>>,
   key: DefaultKey,
@@ -41,15 +43,22 @@ impl<T> ResourceRc<T> {
   }
 }
 
+pub type UnlockedResource<'a, T> = MappedRwLockReadGuard<'a, T>;
+
 pub trait IntoResource {
   type ProxyType;
   fn into(self) -> Resource;
 }
 
 pub enum Resource {
+  Texture(wgpu::Texture),
   TextureView(wgpu::TextureView),
   Buffer(wgpu::Buffer),
   Shader(wgpu::ShaderModule),
+  BindGroupLayout(wgpu::BindGroupLayout),
+  PipelineLayout(wgpu::PipelineLayout),
+  BindGroup(wgpu::BindGroup),
+  RenderPipeline(wgpu::RenderPipeline),
 }
 
 pub struct ResourceStorage {
@@ -101,8 +110,13 @@ macro_rules! make_into_resource {
   };
 }
 make_into_resource!(Buffer, Buffer);
+make_into_resource!(Texture, Texture);
 make_into_resource!(TextureView, TextureView);
 make_into_resource!(Shader, ShaderModule);
+make_into_resource!(PipelineLayout, PipelineLayout);
+make_into_resource!(BindGroupLayout, BindGroupLayout);
+make_into_resource!(BindGroup, BindGroup);
+make_into_resource!(RenderPipeline, RenderPipeline);
 
 // Definition structures
 #[derive(Clone, Copy, Debug)]
@@ -116,6 +130,22 @@ pub enum VertexAttributeFormat {
   UInt2,
   UInt,
 }
+
+impl VertexAttributeFormat {
+  pub fn to_wgpu(&self) -> wgpu::VertexFormat {
+    match self {
+      VertexAttributeFormat::Float4 => wgpu::VertexFormat::Float4,
+      VertexAttributeFormat::Float3 => wgpu::VertexFormat::Float3,
+      VertexAttributeFormat::Float2 => wgpu::VertexFormat::Float2,
+      VertexAttributeFormat::Float => wgpu::VertexFormat::Float,
+      VertexAttributeFormat::UInt4 => wgpu::VertexFormat::Uint4,
+      VertexAttributeFormat::UInt3 => wgpu::VertexFormat::Uint3,
+      VertexAttributeFormat::UInt2 => wgpu::VertexFormat::Uint2,
+      VertexAttributeFormat::UInt => wgpu::VertexFormat::Uint,
+    }
+  }
+}
+
 #[derive(Clone)]
 pub struct VertexAttribute {
   pub name: String,
@@ -124,6 +154,7 @@ pub struct VertexAttribute {
   pub location: usize,
 }
 
+#[derive(Clone)]
 pub struct VertexBuffer {
   pub stride: u64,
   pub attributes: Vec<VertexAttribute>,
@@ -165,4 +196,122 @@ bitflags::bitflags! {
         /// Allow a buffer to be the indirect buffer in an indirect draw call.
         const INDIRECT = 256;
     }
+}
+
+pub struct BindGroupLayoutDescriptor {
+  pub entries: Vec<BindGroupLayoutEntry>,
+}
+
+pub struct BindGroupLayoutEntry {
+  pub binding: u32,
+  pub ty: BindGroupLayoutEntryType,
+}
+
+pub enum BindGroupLayoutEntryType {
+  UniformBuffer,
+}
+
+impl BindGroupLayoutDescriptor {
+  pub fn new() -> Self {
+    Self {
+      entries: Vec::new(),
+    }
+  }
+
+  pub fn add_entry(mut self, binding: u32, ty: BindGroupLayoutEntryType) -> Self {
+    self.entries.push(BindGroupLayoutEntry { binding, ty });
+    self
+  }
+}
+
+pub struct PipelineLayoutDescriptor {
+  pub bindings: Vec<ResourceRc<BindGroupLayout>>,
+}
+impl PipelineLayoutDescriptor {
+  pub fn new() -> Self {
+    Self {
+      bindings: Vec::new(),
+    }
+  }
+
+  pub fn add_binding(mut self, resource: ResourceRc<BindGroupLayout>) -> Self {
+    self.bindings.push(resource);
+    self
+  }
+}
+
+pub struct BindGroupDescriptor {
+  pub layout: ResourceRc<BindGroupLayout>,
+  pub entries: Vec<(u32, BindGroupEntry)>,
+}
+
+impl BindGroupDescriptor {
+  pub fn new(layout: ResourceRc<BindGroupLayout>) -> Self {
+    Self {
+      layout,
+      entries: Vec::new(),
+    }
+  }
+
+  pub fn add_buffer_binding(mut self, binding: u32, buffer: ResourceRc<Buffer>) -> Self {
+    self.entries.push((binding, BindGroupEntry::Buffer(buffer)));
+    self
+  }
+}
+
+pub enum BindGroupEntry {
+  Buffer(ResourceRc<Buffer>),
+}
+
+impl BindGroupEntry {
+  pub fn read(&self) -> UnlockedBindGroupEntry {
+    match self {
+      BindGroupEntry::Buffer(buffer) => UnlockedBindGroupEntry::Buffer(buffer.get_raw()),
+    }
+  }
+}
+
+pub enum UnlockedBindGroupEntry<'a> {
+  Buffer(MappedRwLockReadGuard<'a, wgpu::Buffer>),
+}
+
+pub struct RenderPipelineDescriptor {
+  pub layout: ResourceRc<PipelineLayout>,
+  pub vertex_shader: ResourceRc<Shader>,
+  pub vertex_desc: VertexBuffer,
+  pub fragment_shader: ResourceRc<Shader>,
+  pub outputs: Vec<RenderPipelineOutput>,
+  pub depth: Option<TextureFormat>,
+}
+
+pub struct RenderPipelineOutput {
+  pub format: TextureFormat,
+}
+
+impl RenderPipelineDescriptor {
+  pub fn new(
+    layout: ResourceRc<PipelineLayout>,
+    vertex_desc: VertexBuffer,
+    vertex_shader: ResourceRc<Shader>,
+    fragment_shader: ResourceRc<Shader>,
+  ) -> Self {
+    Self {
+      layout,
+      vertex_desc,
+      vertex_shader,
+      fragment_shader,
+      depth: None,
+      outputs: Vec::new(),
+    }
+  }
+
+  pub fn add_color_output(mut self, format: TextureFormat) -> Self {
+    self.outputs.push(RenderPipelineOutput { format });
+    self
+  }
+
+  pub fn add_depth(mut self, format: TextureFormat) -> Self {
+    self.depth = Some(format);
+    self
+  }
 }

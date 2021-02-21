@@ -1,8 +1,7 @@
-use futures::{executor::block_on, Future};
+use futures::Future;
 use moonwave_common::Vector2;
 use moonwave_render::{DeviceHost, FrameGraph};
 use std::{
-  marker::PhantomData,
   sync::{Arc, RwLock},
   time::Instant,
 };
@@ -11,13 +10,15 @@ use shaderc::Compiler;
 pub use shaderc::ShaderKind;
 use thiserror::Error;
 use wgpu::{
-  BufferDescriptor, Device, Queue, Surface, SwapChain, SwapChainDescriptor, SwapChainError,
+  util::DeviceExt, BufferDescriptor, Device, Queue, Surface, SwapChain, SwapChainDescriptor,
+  SwapChainError,
 };
 
 use crate::{
   execution::Execution, nodes::PresentToScreen, warn, EstimatedExecutionTime, Extension,
   ExtensionHost, GenericIntoActor, World,
 };
+
 use moonwave_resources::*;
 
 pub struct Core {
@@ -133,6 +134,42 @@ impl Core {
     &self.graph
   }
 
+  pub fn get_arced(&self) -> Arc<Core> {
+    self.arced.as_ref().unwrap().clone()
+  }
+
+  /// Creates a new memory buffer on the GPU and initiales it with the given data.
+  pub async fn create_inited_buffer(
+    &self,
+    data: Box<[u8]>,
+    usage: BufferUsage,
+    label: Option<&str>,
+  ) -> ResourceRc<Buffer> {
+    let label = label.map(|l| l.to_string());
+    let self_cloned = self.arced.as_ref().unwrap().clone();
+    self
+      .schedule_weighted_task(
+        TaskKind::Background,
+        async move {
+          optick::event!("Core::create_inited_buffer");
+
+          // Create inited data.
+          let buffer = self_cloned
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+              label: label.as_deref(),
+              usage: wgpu::BufferUsage::from_bits(usage.bits()).unwrap(),
+              contents: &data,
+            });
+
+          // Create proxy
+          self_cloned.resources.create_proxy(buffer)
+        },
+        EstimatedExecutionTime::FractionOfFrame(1),
+      )
+      .await
+  }
+
   /// Creates a new memory buffer on the GPU.
   pub async fn create_buffer(
     &self,
@@ -164,6 +201,254 @@ impl Core {
         },
         EstimatedExecutionTime::FractionOfFrame(1),
       )
+      .await
+  }
+
+  /// Creates a new empty texture
+  pub async fn create_texture(
+    &self,
+    label: Option<&str>,
+    usage: TextureUsage,
+    format: TextureFormat,
+    size: Vector2<u32>,
+    mips: u32,
+  ) -> ResourceRc<Texture> {
+    // Prepare
+    let label = label.map(|l| l.to_string());
+
+    // Create raw device buffer.
+    let self_cloned = self.arced.as_ref().unwrap().clone();
+    self
+      .schedule_weighted_task(
+        TaskKind::Background,
+        async move {
+          optick::event!("Core::create_texture");
+          let raw = self_cloned.device.create_texture(&wgpu::TextureDescriptor {
+            label: label.as_deref(),
+            mip_level_count: mips,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            size: wgpu::Extent3d {
+              width: size.x,
+              height: size.y,
+              depth: 1,
+            },
+            usage,
+            format,
+          });
+
+          // Create proxy
+          self_cloned.resources.create_proxy(raw)
+        },
+        EstimatedExecutionTime::FractionOfFrame(1),
+      )
+      .await
+  }
+
+  /// Creates a new texture view.
+  pub async fn create_texture_view(&self, texture: ResourceRc<Texture>) -> ResourceRc<TextureView> {
+    // Create raw device buffer.
+    let self_cloned = self.arced.as_ref().unwrap().clone();
+    self
+      .schedule_weighted_task(
+        TaskKind::Background,
+        async move {
+          optick::event!("Core::create_texture_view");
+          let raw = texture
+            .get_raw()
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+          // Create proxy
+          self_cloned.resources.create_proxy(raw)
+        },
+        EstimatedExecutionTime::FractionOfFrame(1),
+      )
+      .await
+  }
+
+  /// Creates a new bind group layout.
+  pub async fn create_bind_group_layout(
+    &self,
+    desc: BindGroupLayoutDescriptor,
+  ) -> ResourceRc<BindGroupLayout> {
+    let self_cloned = self.arced.as_ref().unwrap().clone();
+
+    self
+      .schedule_task(TaskKind::Background, async move {
+        optick::event!("Core::create_bind_group_layout");
+
+        let entries = desc
+          .entries
+          .iter()
+          .map(|entry| wgpu::BindGroupLayoutEntry {
+            binding: entry.binding,
+            count: None,
+            visibility: wgpu::ShaderStage::all(),
+            ty: match entry.ty {
+              BindGroupLayoutEntryType::UniformBuffer => wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+              },
+            },
+          })
+          .collect::<Vec<_>>();
+
+        let raw = self_cloned
+          .device
+          .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &entries,
+          });
+
+        self_cloned.resources.create_proxy(raw)
+      })
+      .await
+  }
+
+  /// Creates a new pipeline layout.
+  pub async fn create_pipeline_layout(
+    &self,
+    desc: PipelineLayoutDescriptor,
+  ) -> ResourceRc<PipelineLayout> {
+    let self_cloned = self.arced.as_ref().unwrap().clone();
+
+    self
+      .schedule_task(TaskKind::Background, async move {
+        optick::event!("Core::create_pipeline_layout");
+
+        let bindings = desc
+          .bindings
+          .iter()
+          .map(|binding| binding.get_raw())
+          .collect::<Vec<_>>();
+
+        let raw = self_cloned
+          .device
+          .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &bindings
+              .iter()
+              .map(|binding| &**binding)
+              .collect::<Vec<_>>(),
+            push_constant_ranges: &[],
+          });
+
+        self_cloned.resources.create_proxy(raw)
+      })
+      .await
+  }
+
+  /// Creates a new bind group.
+  pub async fn create_bind_group(&self, desc: BindGroupDescriptor) -> ResourceRc<BindGroup> {
+    let self_cloned = self.arced.as_ref().unwrap().clone();
+
+    self
+      .schedule_task(TaskKind::Background, async move {
+        optick::event!("Core::create_bind_group");
+
+        // Get locks on all related resources.
+        let entries = desc
+          .entries
+          .iter()
+          .map(|(binding, res)| (*binding, res.read()))
+          .collect::<Vec<_>>();
+
+        // Create bind group entry
+        let wgpu_entries = entries.iter().map(|(binding, entry)| {
+          (
+            *binding,
+            match entry {
+              UnlockedBindGroupEntry::Buffer(buffer) => wgpu::BindingResource::Buffer {
+                buffer: &*buffer,
+                offset: 0,
+                size: None,
+              },
+            },
+          )
+        });
+
+        let raw = self_cloned
+          .device
+          .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &*desc.layout.get_raw(),
+            entries: &wgpu_entries
+              .into_iter()
+              .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource })
+              .collect::<Vec<_>>(),
+          });
+
+        self_cloned.resources.create_proxy(raw)
+      })
+      .await
+  }
+
+  /// Creates a new bind group.
+  pub async fn create_render_pipeline(
+    &self,
+    desc: RenderPipelineDescriptor,
+  ) -> ResourceRc<RenderPipeline> {
+    let self_cloned = self.arced.as_ref().unwrap().clone();
+
+    self
+      .schedule_task(TaskKind::Background, async move {
+        optick::event!("Core::create_render_pipeline");
+
+        let vs = desc.vertex_shader.get_raw();
+        let fs = desc.fragment_shader.get_raw();
+
+        let raw = self_cloned
+          .device
+          .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: Some(&*desc.layout.get_raw()),
+            multisample: wgpu::MultisampleState::default(),
+            vertex: wgpu::VertexState {
+              module: &*vs,
+              entry_point: "main",
+              buffers: &[wgpu::VertexBufferLayout {
+                array_stride: desc.vertex_desc.stride,
+                step_mode: wgpu::InputStepMode::Vertex,
+                attributes: &desc
+                  .vertex_desc
+                  .attributes
+                  .iter()
+                  .map(|attr| wgpu::VertexAttribute {
+                    shader_location: attr.location as u32,
+                    offset: attr.offset,
+                    format: attr.format.to_wgpu(),
+                  })
+                  .collect::<Vec<_>>(),
+              }],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: desc.depth.map(|depth| wgpu::DepthStencilState {
+              bias: wgpu::DepthBiasState::default(),
+              stencil: wgpu::StencilState::default(),
+              format: depth,
+              clamp_depth: false,
+              depth_compare: wgpu::CompareFunction::GreaterEqual,
+              depth_write_enabled: true,
+            }),
+            fragment: Some(wgpu::FragmentState {
+              module: &*fs,
+              entry_point: "main",
+              targets: &desc
+                .outputs
+                .iter()
+                .map(|output| wgpu::ColorTargetState {
+                  format: output.format,
+                  alpha_blend: wgpu::BlendState::default(),
+                  color_blend: wgpu::BlendState::default(),
+                  write_mask: wgpu::ColorWrite::all(),
+                })
+                .collect::<Vec<_>>(),
+            }),
+          });
+
+        self_cloned.resources.create_proxy(raw)
+      })
       .await
   }
 
@@ -273,4 +558,8 @@ impl DeviceHost for Core {
   fn get_queue(&self) -> &wgpu::Queue {
     &self.queue
   }
+}
+
+pub trait BindGroupLayoutSingleton {
+  fn get_bind_group_lazy(core: &Core) -> ResourceRc<BindGroupLayout>;
 }

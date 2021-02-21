@@ -144,3 +144,23 @@ impl ShaderNode for Deconstruct {
     }
   }
 }
+
+pub struct Vector3Upgrade;
+impl Vector3Upgrade {
+  pub const INPUT: usize = 0;
+  pub const OUTPUT: usize = 0;
+}
+impl ShaderNode for Vector3Upgrade {
+  fn get_outputs(&self) -> Vec<ShaderType> {
+    vec![ShaderType::Float4]
+  }
+
+  fn generate(&self, inputs: &[Option<String>], outputs: &[Option<String>], output: &mut String) {
+    *output += format!(
+      "vec4 {} = vec4({}, 1.0);\n",
+      outputs[Self::OUTPUT].as_ref().unwrap(),
+      inputs[Self::INPUT].as_ref().unwrap()
+    )
+    .as_str();
+  }
+}
