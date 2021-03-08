@@ -19,33 +19,28 @@ pub struct Uniform<T: UniformStruct> {
 }
 
 impl<T: UniformStruct + BindGroupLayoutSingleton + Send + Sync + 'static> Uniform<T> {
-  pub async fn new(initial: T, core: &Core) -> Self {
+  pub fn new(initial: T) -> Self {
     let size = initial.generate_raw_u8().len() as u64;
 
-    let staging_buffer = core
-      .create_buffer(
-        size,
-        false,
-        BufferUsage::MAP_WRITE | BufferUsage::COPY_SRC,
-        None,
-      )
-      .await;
+    let core = Core::get_instance();
+    let staging_buffer = core.create_buffer(
+      size,
+      false,
+      BufferUsage::MAP_WRITE | BufferUsage::COPY_SRC,
+      None,
+    );
 
-    let buffer = core
-      .create_buffer(
-        size,
-        false,
-        BufferUsage::UNIFORM | BufferUsage::COPY_DST,
-        None,
-      )
-      .await;
+    let buffer = core.create_buffer(
+      size,
+      false,
+      BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+      None,
+    );
 
-    let bind_group_layout = T::get_bind_group_lazy(core);
-    let bind_group = core
-      .create_bind_group(
-        BindGroupDescriptor::new(bind_group_layout).add_buffer_binding(0, buffer.clone()),
-      )
-      .await;
+    let bind_group_layout = T::get_bind_group_lazy();
+    let bind_group = core.create_bind_group(
+      BindGroupDescriptor::new(bind_group_layout).add_buffer_binding(0, buffer.clone()),
+    );
 
     Self {
       buffer,
@@ -69,14 +64,14 @@ impl<T: UniformStruct + BindGroupLayoutSingleton + Send + Sync + 'static> Unifor
     self.bind_group.clone()
   }
 
-  pub fn lazy_get_frame_node(&self, core: &Core) -> Index {
+  pub fn lazy_get_frame_node(&self) -> Index {
     let mut node = self.frame_node.write();
     if let Some(node) = *node {
       return node;
     }
 
     let name = T::generate_name();
-    let node_index = core.get_frame_graph().add_node(
+    let node_index = Core::get_instance().get_frame_graph().add_node(
       DynamicUniformNode {
         buffer: self.buffer.clone(),
         buffer_staging: self.staging_buffer.clone(),

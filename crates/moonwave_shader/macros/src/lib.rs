@@ -162,6 +162,16 @@ pub fn vertex(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
       }
     }
+
+    impl moonwave_scene::MeshVertex for #struct_ident {
+      fn get_position(&self) -> &Vector3<f32> {
+        &self.position
+      }
+      fn get_position_mut(&mut self) -> &mut Vector3<f32> {
+        &mut self.position
+      }
+    }
+
   })
 }
 
@@ -226,12 +236,12 @@ pub fn uniform(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     impl moonwave_core::BindGroupLayoutSingleton for #struct_ident {
-      fn get_bind_group_lazy(core: &Core) -> moonwave_resources::ResourceRc<moonwave_resources::BindGroupLayout> {
+      fn get_bind_group_lazy() -> moonwave_resources::ResourceRc<moonwave_resources::BindGroupLayout> {
         static cell: moonwave_core::OnceCell<moonwave_resources::ResourceRc<moonwave_resources::BindGroupLayout>> = moonwave_core::OnceCell::new();
         cell.get_or_init(|| {
           let desc = moonwave_resources::BindGroupLayoutDescriptor::new()
             .add_entry(0, moonwave_resources::BindGroupLayoutEntryType::UniformBuffer);
-          let layout = moonwave_core::block_on(core.create_bind_group_layout(desc));
+          let layout = moonwave_core::Core::get_instance().create_bind_group_layout(desc);
           layout
         }).clone()
       }

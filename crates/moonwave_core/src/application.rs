@@ -1,5 +1,5 @@
-use crate::{base::Core, logger::init, GenericIntoActor};
-use std::sync::Arc;
+use crate::{base::Core, logger::init, ActorRc, Spawnable, TypedServiceIntoHost};
+use legion::{systems::CommandBuffer, Resources};
 use wgpu::SwapChainError;
 use winit::{
   dpi::PhysicalSize,
@@ -12,11 +12,10 @@ pub struct Application {
   event_loop: Option<EventLoop<()>>,
   window: Window,
   win_size: PhysicalSize<u32>,
-  core: Arc<Core>,
 }
 
 impl Application {
-  pub fn new<T: GenericIntoActor>(root: T) -> Self {
+  pub fn new() -> Self {
     // Initialize core logging systems.
     init();
 
@@ -63,15 +62,12 @@ impl Application {
       (surface, device, queue, swap_chain, sc_desc)
     });
 
-    let mut core = Arc::new(Core::new(device, queue, swap_chain, sc_desc, surface));
-    let cloned_core = core.clone();
-    Arc::get_mut(&mut core).unwrap().setup(cloned_core, root);
+    Core::initialize(device, queue, swap_chain, sc_desc, surface);
 
     Self {
       event_loop: Some(event_loop),
       window,
       win_size,
-      core,
     }
   }
 
@@ -79,15 +75,17 @@ impl Application {
     self.window.set_title(title);
   }
 
+  pub fn register_service<T: TypedServiceIntoHost>(&self, system: T) {
+    Core::get_instance().get_service_locator().register(system);
+  }
+
   fn handle_update_size(&mut self) {
     self.win_size = self.window.inner_size();
 
     // This is safe to the way the threading model is built. This will be always executed on the main thread
     // Swapchain recreation is also garantued to be not touched during any background tasks.
-    unsafe {
-      Arc::get_mut_unchecked(&mut self.core)
-        .recreate_swap_chain(self.win_size.width, self.win_size.height);
-    }
+    Core::get_instance_mut_unstable()
+      .recreate_swap_chain(self.win_size.width, self.win_size.height);
   }
 
   fn render(&mut self) -> Result<(), SwapChainError> {
@@ -97,11 +95,24 @@ impl Application {
     // Execute core application.
     // This is safe to the way the threading model is built. This will be always executed on the main thread
     // Only the frame is being accessed which is never touched during any background tasks.
-    let core = self.core.clone();
-    unsafe { Arc::get_mut_unchecked(&mut self.core).frame(core) }
+    Core::get_instance_mut_unstable().frame()
   }
 
+  /// Spawns a new actor into the application.
+  /// Panics if called after application started.
+  pub fn add_actor<T: Spawnable>(&self, actor: T) -> ActorRc<T> {
+    let mut cmd = CommandBuffer::new(&Core::get_instance().get_world().world);
+    let rc = actor.spawn(None, 0, &mut cmd);
+    cmd.flush(
+      &mut Core::get_instance_mut_unstable().get_world_mut().world,
+      &mut Resources::default(),
+    );
+    rc
+  }
+
+  /// Starts execution of the application, will block current thread until application exits.
   pub fn run(mut self) {
+    // Build event loop.
     let event_loop = self.event_loop.take().unwrap();
 
     // Run window

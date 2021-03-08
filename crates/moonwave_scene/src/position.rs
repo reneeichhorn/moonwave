@@ -24,21 +24,18 @@ pub struct Model {
 }
 
 impl Model {
-  pub async fn new(core: &Core) -> Self {
+  pub fn new() -> Self {
     REGISTERED_SYSTEM.call_once(|| {
+      let core = Core::get_instance();
       core
         .get_world()
         .add_system_to_stage(UpdateModelUniformSystem, SystemStage::RenderingPreperations)
     });
 
     Self {
-      uniform: Uniform::new(
-        ModelUniform {
-          matrix: Matrix4::identity(),
-        },
-        core,
-      )
-      .await,
+      uniform: Uniform::new(ModelUniform {
+        matrix: Matrix4::identity(),
+      }),
       space: ModelSpace::World,
       position: Vector3::new(0.0, 0.0, 0.0),
       rotation: Vector3::new(0.0, 0.0, 0.0),

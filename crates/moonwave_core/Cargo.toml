@@ -11,7 +11,7 @@ optick = "1.3"
 flume = "0.10"
 shaderc = "0.7"
 thiserror = "1.0"
-async-task = "4.0"
+async-executor = "1.4.0"
 wgpu = "0.7"
 futures = "0.3"
 winit = "0.24"
@@ -23,9 +23,9 @@ moonwave_render = { path = "../moonwave_render" }
 moonwave_common = { path = "../moonwave_common" }
 moonwave_core_macro = { path = "./macros" }
 async-std = "1.9"
-legion = "0.3"
+legion = "0.4"
 rayon = "1.5"
-parking_lot = "0.11"
+parking_lot = { version = "0.11", features = ["deadlock_detection"] }
 send_wrapper = "0.5"
 generational-arena = "0.2"
 owning_ref = "0.4.1"

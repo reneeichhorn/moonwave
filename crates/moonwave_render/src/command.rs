@@ -40,10 +40,12 @@ impl<'a> CommandEncoder<'a> {
     // Create future
     let fut = async {
       let raw_buffer = buffer.get_raw();
-      let slice = raw_buffer.slice(0..);
-      slice.map_async(wgpu::MapMode::Write).await.unwrap();
-      let mut writeable = slice.get_mapped_range_mut();
-      writeable.clone_from_slice(data);
+      {
+        let slice = raw_buffer.slice(0..);
+        slice.map_async(wgpu::MapMode::Write).await.unwrap();
+        let mut writeable = slice.get_mapped_range_mut();
+        writeable.clone_from_slice(data);
+      }
       raw_buffer.unmap();
     };
 

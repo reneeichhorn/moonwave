@@ -31,26 +31,22 @@ impl<T: MeshVertex, I: MeshIndex> Mesh<T, I> {
     self.indices.len()
   }
 
-  pub async fn build_vertex_buffer(&self, core: &Core) -> ResourceRc<Buffer> {
+  pub fn build_vertex_buffer(&self) -> ResourceRc<Buffer> {
     // Build raw
     let raw = cast_slice(&self.vertices);
     let raw_boxed = Box::from(raw);
 
     // Build buffer.
-    core
-      .create_inited_buffer(raw_boxed, BufferUsage::VERTEX, None)
-      .await
+    Core::get_instance().create_inited_buffer(raw_boxed, BufferUsage::VERTEX, None)
   }
 
-  pub async fn build_index_buffer(&self, core: &Core) -> ResourceRc<Buffer> {
+  pub fn build_index_buffer(&self) -> ResourceRc<Buffer> {
     // Build raw
     let raw = cast_slice(&self.indices);
     let raw_boxed = Box::from(raw);
 
     // Build buffer.
-    core
-      .create_inited_buffer(raw_boxed, BufferUsage::INDEX, None)
-      .await
+    Core::get_instance().create_inited_buffer(raw_boxed, BufferUsage::INDEX, None)
   }
 }
 

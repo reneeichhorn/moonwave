@@ -1,11 +1,14 @@
 use crate::{CommandEncoder, CommandEncoderOutput};
-use futures::{executor::block_on, future::join_all, Future};
 use generational_arena::Arena;
 use moonwave_resources::{BindGroup, Buffer, ResourceRc, TextureView};
 use multimap::MultiMap;
 use parking_lot::{RwLock, RwLockReadGuard};
-use std::pin::Pin;
-use std::sync::Arc;
+use rayon::{prelude::*, ThreadPool};
+use std::{
+  collections::HashMap,
+  fmt::{Debug, Formatter},
+  sync::Arc,
+};
 
 pub use generational_arena::Index;
 
@@ -32,13 +35,6 @@ pub trait FrameGraphNode: Send + Sync + 'static {
   }
 }
 
-#[derive(Clone)]
-pub enum FrameNodeValue {
-  Buffer(ResourceRc<Buffer>),
-  BindGroup(ResourceRc<BindGroup>),
-  TextureView(ResourceRc<TextureView>),
-}
-
 const MAX_LAYERS: usize = 8;
 const MAX_NODES_PER_LAYER: usize = 8;
 const MAX_INPUT_OUTPUTS_PER_NODE: usize = 16;
@@ -60,6 +56,7 @@ pub struct FrameGraph {
   end_node: Index,
   output_map: Vec<Vec<Option<FrameNodeValue>>>,
   levels_map: MultiMap<usize, TraversedGraphNode>,
+  traversed_node_cache: HashMap<Index, usize>,
 }
 
 impl FrameGraph {
@@ -79,6 +76,9 @@ impl FrameGraph {
       )),
       output_map: vec![vec![None; MAX_NODES_PER_LAYER * MAX_INPUT_OUTPUTS_PER_NODE]; MAX_LAYERS],
       levels_map: MultiMap::with_capacity(MAX_LAYERS),
+      traversed_node_cache: HashMap::with_capacity(
+        MAX_LAYERS * MAX_INPUT_OUTPUTS_PER_NODE * MAX_NODES_PER_LAYER,
+      ),
       end_node,
     }
   }
@@ -94,6 +94,7 @@ impl FrameGraph {
     let end_node_impl = nodes.get(self.end_node).unwrap().node.clone();
 
     nodes.clear();
+    self.traversed_node_cache.clear();
     self.edges_arena.write().clear();
     self.end_node = nodes.insert(ConnectedNode {
       name: "EndNode".to_string(),
@@ -149,6 +150,7 @@ impl FrameGraph {
   }
 
   fn traverse_node(
+    cache: &mut HashMap<Index, usize>,
     levels_map: &mut MultiMap<usize, TraversedGraphNode>,
     nodes: &RwLockReadGuard<Arena<ConnectedNode>>,
     edges: &RwLockReadGuard<Arena<ConnectedEdges>>,
@@ -197,98 +199,135 @@ impl FrameGraph {
         let edge = edges.get(*input).unwrap();
         let inner_node = edge.owner_node_index;
         traversed_node.inputs[input_index] = Some((next_level, edge.output_index, inner_node));
-        Self::traverse_node(levels_map, nodes, edges, inner_node, next_level);
+        Self::traverse_node(cache, levels_map, nodes, edges, inner_node, next_level);
       }
     }
 
     // Store traversed node at level.
+    let traversed_index = levels_map.get_vec(&level).map(|x| x.len()).unwrap_or(0);
+    //cache.insert(node_index, traversed_index);
+    // TODO: Due to retaining this index breaks currently :'(
     levels_map.insert(level, traversed_node);
   }
 
   /// Executes the graph using the given scheduler.
-  pub fn execute<T: DeviceHost, F>(
+  pub fn execute<T: DeviceHost>(
     &mut self,
     sc_frame: Arc<wgpu::SwapChainFrame>,
-    device_host: Arc<T>,
-    scheduler: F,
-  ) where
-    F: Fn(
-      Pin<Box<dyn Future<Output = CommandEncoderOutput> + Send + Sync>>,
-    ) -> Pin<Box<dyn Future<Output = CommandEncoderOutput>>>,
-  {
+    device_host: &'static T,
+    pool: &ThreadPool,
+  ) {
     {
-      // Gain read access to nodes and connections.
-      let nodes = self.node_arena.read();
-      let edges = self.edges_arena.read();
+      {
+        // Gain read access to nodes and connections.
+        let nodes = self.node_arena.read();
+        let edges = self.edges_arena.read();
 
-      // Start traversing from end.
-      Self::traverse_node(&mut self.levels_map, &nodes, &edges, self.end_node, 0);
+        // Start traversing from end.
+        self.levels_map.clear();
+        Self::traverse_node(
+          &mut self.traversed_node_cache,
+          &mut self.levels_map,
+          &nodes,
+          &edges,
+          self.end_node,
+          0,
+        );
+      }
+      let cache = &mut self.traversed_node_cache;
 
       // Execute in levels order
       let mut all_levels = self.levels_map.keys().cloned().collect::<Vec<_>>();
       all_levels.sort_unstable();
 
+      let max_levels = all_levels.len();
       for level in all_levels.into_iter().rev() {
         optick::event!("FrameGraph::execute_level");
         optick::tag!("level", level as u32);
 
         // Get rid of duplicated nodes.
-        let nodes_in_level = self.levels_map.get_vec_mut(&level).unwrap();
+        let mut nodes_in_level = self.levels_map.get_vec_mut(&level).unwrap().clone();
         nodes_in_level.sort_unstable_by_key(|x| x.index);
         nodes_in_level.dedup_by_key(|x| x.index);
 
-        let mut output_map_offset = 0;
-
-        // Execute
-        let mut futures = Vec::with_capacity(nodes_in_level.len());
-        for traversed_node in nodes_in_level {
-          optick::event!("FrameGraph::node");
-
-          // Prepare node execution
-          let node = nodes.get(traversed_node.index).unwrap();
-          optick::tag!("name", node.name);
-          let node_trait = node.node.clone();
-          let label = format!("NodeCommandEncoder_{}", node.name);
-
-          // Map outputs -> inputs.
-          let output_map = &self.output_map;
-          let inputs = traversed_node
-            .inputs
-            .iter()
-            .map(|input| input.map(|(level, output_index, _)| &output_map[level][output_index]))
-            .map(|input| match input {
-              Some(Some(rf)) => Some(rf.clone()),
-              _ => None,
-            })
-            .collect::<Vec<_>>();
-          let mut outputs =
-            self.output_map[level][output_map_offset..MAX_INPUT_OUTPUTS_PER_NODE].to_vec();
-
-          let device_host_cloned = device_host.clone();
-          let sc_cloned = sc_frame.clone();
-          let fut = scheduler(Box::pin(async move {
-            optick::event!("FrameGraph::record_commands");
-            optick::tag!("name", label);
-
-            // Execute node asynchronisly.
-            node_trait.execute_raw(
-              &inputs,
-              &mut outputs,
-              device_host_cloned.get_device(),
-              device_host_cloned.get_queue(),
-              &*sc_cloned,
-            )
-          }));
-
-          output_map_offset += MAX_INPUT_OUTPUTS_PER_NODE;
-          futures.push(fut);
+        // Build cache for this level
+        for (index, node) in nodes_in_level.iter().enumerate() {
+          cache.insert(node.index, index);
         }
 
-        let encoder_outputs = {
-          optick::event!("FrameGraph::barrier_level");
-          optick::tag!("level", level as u32);
-          block_on(join_all(futures))
+        // Get chunks
+        let nodes = self.node_arena.read();
+        let read_nodes = nodes_in_level
+          .iter()
+          .map(|node| (nodes.get(node.index).unwrap(), node.inputs))
+          .collect::<Vec<_>>();
+
+        let mut empty = [Vec::with_capacity(0)];
+        #[allow(clippy::type_complexity)]
+        let (outputs, previous_outputs): (
+          &mut [Vec<Option<FrameNodeValue>>],
+          &mut [Vec<Option<FrameNodeValue>>],
+        ) = if level == (max_levels - 1) {
+          (&mut self.output_map, &mut empty)
+        } else {
+          self.output_map.split_at_mut(level + 1)
         };
+
+        let outputs_per_node = outputs[outputs.len() - 1]
+          .chunks_mut(MAX_INPUT_OUTPUTS_PER_NODE)
+          .enumerate()
+          .collect::<Vec<_>>();
+
+        // Execute
+        let encoder_outputs = pool.install(|| {
+          read_nodes
+            .par_iter()
+            .zip(outputs_per_node)
+            .enumerate()
+            .map(|(i, ((node, inputs), (oi, outputs)))| {
+              optick::event!("FrameGraph::node");
+
+              // Prepare node execution
+              optick::tag!("name", node.name);
+              let node_trait = node.node.clone();
+              let label = format!("NodeCommandEncoder_{}", node.name);
+
+              // Map outputs -> inputs.
+              let inputs = inputs
+                .iter()
+                .map(|input| {
+                  input.map(|(target_level, output_index, node_index)| {
+                    let i = cache.get(&node_index).unwrap();
+                    &previous_outputs[previous_outputs.len() - (target_level - level)]
+                      [i * MAX_INPUT_OUTPUTS_PER_NODE + output_index]
+                  })
+                })
+                .map(|input| match input {
+                  Some(Some(rf)) => Some(rf.clone()),
+                  _ => None,
+                })
+                .collect::<Vec<_>>();
+
+              let sc_cloned = sc_frame.clone();
+              let out = {
+                optick::event!("FrameGraph::record_commands");
+                optick::tag!("name", label);
+
+                // Execute node asynchronisly.
+                node_trait.execute_raw(
+                  &inputs,
+                  outputs,
+                  device_host.get_device(),
+                  device_host.get_queue(),
+                  &*sc_cloned,
+                )
+              };
+
+              out
+            })
+            .collect::<Vec<_>>()
+        });
+
         {
           optick::event!("FrameGraph::submit_level");
           optick::tag!("level", level as u32);
@@ -306,6 +345,23 @@ impl FrameGraph {
   }
 }
 
+#[derive(Clone)]
+pub enum FrameNodeValue {
+  Buffer(ResourceRc<Buffer>),
+  BindGroup(ResourceRc<BindGroup>),
+  TextureView(ResourceRc<TextureView>),
+}
+
+impl std::fmt::Debug for FrameNodeValue {
+  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::Buffer(_) => f.write_str("Buffer"),
+      Self::BindGroup(_) => f.write_str("BindGroup"),
+      Self::TextureView(_) => f.write_str("Texture"),
+    }
+  }
+}
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -320,6 +376,7 @@ pub enum GraphConnectError {
   AlreadyConnected,
 }
 
+#[derive(Clone)]
 struct TraversedGraphNode {
   index: Index,
   inputs: [Option<(usize, usize, Index)>; MAX_INPUT_OUTPUTS_PER_NODE],
@@ -336,7 +393,11 @@ macro_rules! impl_get_node_specific {
       pub fn $getter(&self) -> &ResourceRc<$ty> {
         match self {
           FrameNodeValue::$ty(group) => group,
-          _ => panic!("Unexpected frame node value"),
+          _ => panic!(
+            "Unexpected frame node value, expected '{}' but received '{:?}'",
+            stringify!($ty),
+            self
+          ),
         }
       }
     }

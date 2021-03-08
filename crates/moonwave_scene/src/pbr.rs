@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 
 use crate::{
-  BuiltMaterial, CameraActor, CameraUniform, DynamicUniformNode, MainCameraTag, Material, Mesh,
+  BuiltMaterial, Camera, CameraUniform, DynamicUniformNode, MainCameraTag, Material, Mesh,
   MeshIndex, MeshVertex, Model,
 };
 
@@ -34,38 +34,29 @@ pub struct StaticMeshRenderer {
 }
 
 impl StaticMeshRenderer {
-  pub async fn new<T: MeshVertex + VertexStruct, I: MeshIndex>(
-    core: &Core,
+  pub fn new<T: MeshVertex + VertexStruct, I: MeshIndex>(
     material: &mut Material<T>,
     mesh: &Mesh<T, I>,
   ) -> Self {
     REGISTERED_SYSTEM.call_once(|| {
-      // Add system if not added yet.
-      core
-        .get_world()
-        .add_system_to_stage(CreatePBRFrameGraphSystem, SystemStage::Rendering);
-
       // Create texture nodes.
-      let color = block_on(TextureGeneratorHost::new(
-        core.get_arced(),
-        TextureSize::FullScreen,
-        TextureFormat::Bgra8Unorm,
-      ));
-      let depth = block_on(TextureGeneratorHost::new(
-        core.get_arced(),
-        TextureSize::FullScreen,
-        TextureFormat::Depth32Float,
-      ));
+      let color = TextureGeneratorHost::new(TextureSize::FullScreen, TextureFormat::Bgra8Unorm);
+      let depth = TextureGeneratorHost::new(TextureSize::FullScreen, TextureFormat::Depth32Float);
       PBR_MAIN_COLOR.set(color).ok().unwrap();
       PBR_MAIN_DEPTH.set(depth).ok().unwrap();
+
+      // Add system if not added yet.
+      Core::get_instance()
+        .get_world()
+        .add_system_to_stage(CreatePBRFrameGraphSystem, SystemStage::Rendering);
     });
 
     // Build buffers.
-    let vertex_buffer = mesh.build_vertex_buffer(core).await;
-    let index_buffer = mesh.build_index_buffer(core).await;
+    let vertex_buffer = mesh.build_vertex_buffer();
+    let index_buffer = mesh.build_index_buffer();
 
     // Build material
-    let material = material.build(core).await;
+    let material = material.build();
 
     Self {
       vertex_buffer_desc: T::generate_buffer(),
@@ -89,15 +80,18 @@ enum StaticMeshRendererCache {
 #[write_component(StaticMeshRenderer)]
 #[read_component(Model)]
 #[read_component(MainCameraTag)]
-#[read_component(CameraActor)]
+#[read_component(Camera)]
 pub fn create_pbr_frame_graph(world: &mut SubWorld) {
+  optick::event!("create_pbr_frame_graph");
+
   // Get main camera and its frame node.
-  let (core, main_cam_node) = {
-    let mut main_cam_query = <(&CameraActor, &MainCameraTag)>::query();
-    let (main_cam, _) = main_cam_query.iter(world).next().unwrap();
-    let core = main_cam.get_ext().core.clone();
-    let cam = main_cam.uniform.lazy_get_frame_node(&*core);
-    (core, cam)
+  let main_cam_node = {
+    let mut main_cam_query = <(&Camera, &MainCameraTag)>::query();
+    let (main_cam, _) = main_cam_query
+      .iter(world)
+      .next()
+      .unwrap_or_else(|| panic!("No main camera found in scene"));
+    main_cam.uniform.lazy_get_frame_node()
   };
 
   // Query all static meshes
@@ -116,7 +110,6 @@ pub fn create_pbr_frame_graph(world: &mut SubWorld) {
           // Create cache for the first time.
           StaticMeshRendererCache::Empty => {
             *cache_guard = StaticMeshRendererCache::Creating;
-            let core_cloned = core.clone();
             let cache = obj.cache.clone();
 
             let vs = obj.material.vertex_shader.clone();
@@ -124,15 +117,14 @@ pub fn create_pbr_frame_graph(world: &mut SubWorld) {
             let layout = obj.material.layout.clone();
             let vb = obj.vertex_buffer_desc.clone();
 
-            let _ = core.schedule_task(TaskKind::Background, async move {
-              let pipeline = core_cloned
-                .create_render_pipeline(
-                  RenderPipelineDescriptor::new(layout, vb, vs, fs)
-                    .add_depth(TextureFormat::Depth32Float)
-                    .add_color_output(TextureFormat::Bgra8Unorm),
-                )
-                .await;
+            Core::get_instance().spawn_background_task(move || {
+              let pipeline = Core::get_instance().create_render_pipeline(
+                RenderPipelineDescriptor::new(layout, vb, vs, fs)
+                  .add_depth(TextureFormat::Depth32Float)
+                  .add_color_output(TextureFormat::Bgra8Unorm),
+              );
               *cache.lock() = StaticMeshRendererCache::Created(pipeline);
+              println!("created");
             });
             return None;
           }
@@ -152,7 +144,7 @@ pub fn create_pbr_frame_graph(world: &mut SubWorld) {
     .collect::<Vec<_>>();
 
   // Build frame graph.
-  let frame_graph = core.get_frame_graph();
+  let frame_graph = Core::get_instance().get_frame_graph();
   let pbr_main_color = frame_graph.add_node(
     PBR_MAIN_COLOR.get().unwrap().create_node(),
     "pbr_main_color",
@@ -177,14 +169,6 @@ pub fn create_pbr_frame_graph(world: &mut SubWorld) {
     .unwrap();
   frame_graph
     .connect(
-      main_cam_node,
-      DynamicUniformNode::<CameraUniform>::OUTPUT_BIND_GROUP,
-      pbr_node,
-      PBRRenderGraphNode::INPUT_BIND_GROUPS,
-    )
-    .unwrap();
-  frame_graph
-    .connect(
       pbr_main_color,
       TextureGeneratorNode::OUTPUT_TEXTURE,
       pbr_node,
@@ -197,6 +181,14 @@ pub fn create_pbr_frame_graph(world: &mut SubWorld) {
       TextureGeneratorNode::OUTPUT_TEXTURE,
       pbr_node,
       PBRRenderGraphNode::INPUT_DEPTH,
+    )
+    .unwrap();
+  frame_graph
+    .connect(
+      main_cam_node,
+      DynamicUniformNode::<CameraUniform>::OUTPUT_BIND_GROUP,
+      pbr_node,
+      PBRRenderGraphNode::INPUT_BIND_GROUPS,
     )
     .unwrap();
 }
@@ -232,6 +224,8 @@ impl FrameGraphNode for PBRRenderGraphNode {
     _outputs: &mut [Option<FrameNodeValue>],
     encoder: &mut CommandEncoder,
   ) {
+    optick::event!("FrameGraph::PBR");
+
     // Create render pass.
     let mut rpb = RenderPassCommandEncoderBuilder::new("pbr_rp");
     rpb.add_color_output(

@@ -1,5 +1,6 @@
 pub use moonwave_common::{self, *};
 pub use moonwave_core::{self, *};
+pub use moonwave_scene;
 
 #[doc(hidden)]
 pub use moonwave_resources;

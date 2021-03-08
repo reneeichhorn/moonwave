@@ -1,17 +1,12 @@
 use crate::Core;
 use async_std::sync::{RwLock as AsyncRwLock, RwLockWriteGuard as AsyncRwLockWriteGuard};
-use async_trait::async_trait;
 use futures::{executor::block_on, future::join_all, Future};
 use itertools::Itertools;
-use legion::{
-  storage::{Component, ComponentTypeId, PackedStorage},
-  systems::{CommandBuffer, ParallelRunnable, ResourceTypeId, Runnable, SystemId, UnsafeResources},
-  world::{ArchetypeAccess, Entry, EntryMut, WorldId},
-  EntityStore, Resources, Schedule, World as LegionWorld, WorldOptions,
-};
+use legion::World as LegionWorld;
+use legion::*;
 pub use legion::{system, Entity};
 use owning_ref::{OwningRef, OwningRefMut};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rayon::ThreadPool;
 use send_wrapper::SendWrapper;
 use std::{
@@ -24,41 +19,42 @@ use std::{
 };
 
 pub struct World {
-  core: Arc<Core>,
-  world: AsyncRwLock<LegionWorld>,
+  /// Reference to legions ecs world.
+  pub(crate) world: LegionWorld,
+  /// All system factories that are evaluated when a new system is added or an old is removed.
   systems: RwLock<Vec<(usize, Box<dyn SystemFactory>)>>,
-  built_systems: RwLock<Vec<SendWrapper<Schedule>>>,
   systems_dirty: AtomicBool,
-  root_actor: Entity,
+  /// Built system schedulers for each stage.
+  built_systems: RwLock<Vec<SendWrapper<Schedule>>>,
+  /// Temporary systems that are always executed just once.
+  temp_systems: Mutex<Vec<Box<dyn ParallelRunnable>>>,
+  /// Command buffers that are waiting to be executed.
+  command_buffers: Mutex<Vec<CommandBuffer>>,
 }
 
 impl World {
   /// Creates a new empty world without entities and systems.
-  pub fn new<T: GenericIntoActor>(core: Arc<Core>, root: T) -> Self {
-    // Create world with root actor.
-    let mut world = LegionWorld::new(WorldOptions::default());
-
-    let entity = world.push(());
-    let actor = root.into_actor(core.clone(), entity);
-    world.push_with_id(
-      entity,
-      (
-        actor,
-        ParentComponent {
-          parent: None,
-          children: Vec::new(),
-        },
-      ),
-    );
-
+  pub fn new() -> Self {
     Self {
-      core,
       systems_dirty: AtomicBool::new(false),
       built_systems: RwLock::new(Vec::new()),
-      world: AsyncRwLock::new(world),
+      world: LegionWorld::new(WorldOptions::default()),
       systems: RwLock::new(Vec::new()),
-      root_actor: entity,
+      temp_systems: Mutex::new(Vec::with_capacity(128)),
+      command_buffers: Mutex::new(Vec::with_capacity(128)),
     }
+  }
+
+  /// Adds a temporary system to the world that will be executed exactly once.
+  pub fn add_temp_system(&self, system: Box<dyn ParallelRunnable>) {
+    let mut staging = self.temp_systems.lock();
+    staging.push(system);
+  }
+
+  /// Adds a temporary system to the world that will be executed exactly once.
+  pub fn add_command_buffer(&self, cmd: CommandBuffer) {
+    let mut staging = self.command_buffers.lock();
+    staging.push(cmd);
   }
 
   /// Adds a system to the default application stage causing the system tree to be
@@ -104,161 +100,52 @@ impl World {
     *self.built_systems.write() = built;
   }
 
-  pub async fn quick_reserve(&self) -> Entity {
-    let mut world = self.world.write().await;
-    world.push(())
-  }
-
-  pub async fn spawn_actor<T: GenericIntoActor>(&self, actor: T, parent: Entity) -> ActorRef<T> {
-    optick::event!("World::spawn_actor");
-
-    let mut world = self.world.write().await;
-
-    // Create new entity.
-    let entity = actor
-      .get_reserved_entity()
-      .unwrap_or_else(|| world.push(()));
-    let mut initial_children = Vec::new();
-    actor.get_children(&mut initial_children);
-    let actor = actor.into_actor(self.core.clone(), entity);
-    world.push_with_id(
-      entity,
-      (
-        actor,
-        ParentComponent {
-          parent: Some(parent),
-          children: initial_children,
-        },
-        TickComponent {
-          tick_fn: Arc::new(|core, entity, elapsed| {
-            Box::pin(async move {
-              optick::event!("World::actor::tick()");
-              let mut world = core.get_world().world.write().await;
-              let mut entry = world.entry_mut(entity).unwrap();
-
-              // Tick actor itself.
-              {
-                let actor_comp = entry.get_component_mut::<T::Target>().unwrap();
-                actor_comp.tick(elapsed).await;
-              }
-
-              // Tick all children.
-              let children = entry
-                .get_component::<ParentComponent>()
-                .unwrap()
-                .children
-                .clone();
-
-              drop(entry);
-
-              let futures = children
-                .into_iter()
-                .map(|child| {
-                  let child_entry = world.entry(child).unwrap();
-                  (
-                    child,
-                    child_entry
-                      .get_component::<TickComponent>()
-                      .unwrap()
-                      .tick_fn
-                      .clone(),
-                  )
-                })
-                .map(|(child, tick)| tick(core.clone(), child, elapsed));
-              join_all(futures).await;
-            })
-          }),
-        },
-      ),
-    );
-
-    // Store reference in parent.
-    let mut parent_entry = world.entry(parent).unwrap();
-    let parent = parent_entry.get_component_mut::<ParentComponent>().unwrap();
-    parent.children.push(entity);
-
-    ActorRef {
-      entity,
-      _m: PhantomData::<T> {},
-    }
-  }
-
-  fn despawn_actor_children_sync(
-    guard: &mut AsyncRwLockWriteGuard<'_, LegionWorld>,
-    entity: Entity,
-  ) {
-    // Remove  children
-    let children = {
-      let entry = guard.entry(entity).unwrap();
-      let parent = entry.get_component::<ParentComponent>().unwrap();
-      parent.children.clone()
-    };
-    for child in children {
-      Self::despawn_actor_children_sync(guard, child);
-    }
-
-    // Remove actual actor entity itself.
-    guard.remove(entity);
-  }
-
-  /// Removes an actor from the world.
-  pub async fn despawn_actor(&self, entity: Entity) {
-    optick::event!("World::despawn_actor");
-    let mut world = self.world.write().await;
-
-    // Update parent and remove reference.
-    {
-      let parent = {
-        let parent_entry = world.entry(entity).unwrap();
-        parent_entry
-          .get_component::<ParentComponent>()
-          .unwrap()
-          .parent
-      };
-      if let Some(parent) = parent {
-        let mut parent_entry = world.entry_mut(parent).unwrap();
-        let component = parent_entry.get_component_mut::<ParentComponent>().unwrap();
-        component.children.retain(|e| e != &entity);
-      }
-    }
-
-    // Remove itself and all its children.
-    Self::despawn_actor_children_sync(&mut world, entity);
-  }
-
-  pub fn tick(&self, elapsed: u64) {
+  pub fn tick(&mut self, elapsed: u64, pool: &ThreadPool) {
     // Trigger schedule rebuilding if needed.
     self.rebuild_schedule();
 
-    // Wait until world is unblocked, in this particular case this
-    // should never be blocked as this is the beginning of the frame.
-    let mut world = block_on(self.world.write());
-
-    // Trigger root actor.
-    {
-      optick::event!("World::tick::root");
-      let root = world.entry(self.root_actor).unwrap();
-      if let Ok(tick) = root.get_component::<TickComponent>() {
-        block_on((tick.tick_fn)(self.core.clone(), self.root_actor, elapsed));
-      }
-    }
-
     // Execute all systems grouped by stage.
+    let mut resources = Resources::default();
+    resources.insert(FrameElapsedTime(elapsed));
+
     {
       optick::event!("World::tick::systems");
       let mut systems = self.built_systems.write();
-      let mut resources = Resources::default();
-      let pool = &self.core.execution.pool;
       for system in systems.iter_mut() {
-        system.execute_in_thread_pool(&mut (*world), &mut resources, pool)
+        system.execute_in_thread_pool(&mut self.world, &mut resources, pool)
+      }
+    }
+
+    // Execute temp systems
+    {
+      optick::event!("World::tick::temp_systems");
+      let systems = self.temp_systems.lock().drain(..).collect::<Vec<_>>();
+      let mut builder = Schedule::builder();
+      for temp in systems {
+        builder.add_system(WrappedSystem(temp));
+      }
+      builder
+        .build()
+        .execute_in_thread_pool(&mut self.world, &mut resources, pool)
+    }
+
+    // Command buffers
+    {
+      optick::event!("World::tick::command_buffers");
+      let buffers = self.command_buffers.lock().drain(..).collect::<Vec<_>>();
+      for mut buffer in buffers {
+        buffer.flush(&mut self.world, &mut resources);
       }
     }
   }
 }
 
+/// System resource that holds the elapsed time since previous frame.
+pub struct FrameElapsedTime(pub u64);
+
 /// Simple timer handler that allows to execute specific content every x ms.
 pub struct Timer {
-  pub every_ms: u64,
+  pub every_micros: u64,
   pub elapsed: u64,
   pub dirty: bool,
 }
@@ -267,196 +154,21 @@ impl Timer {
   pub fn tick(&mut self, elapsed: u64) {
     self.elapsed += elapsed;
 
-    if self.elapsed >= self.every_ms {
+    if self.elapsed >= self.every_micros {
       self.dirty = true;
       self.elapsed = 0;
     }
   }
 }
 
-/// The automatically injected base extension for each declared actor
-/// containing all necessary references to its owner.
-pub struct ActorBaseExt {
-  pub entity: Entity,
-  pub core: Arc<Core>,
-  pub timers: Vec<Timer>,
-}
-
-impl ActorBaseExt {
-  pub fn new(core: Arc<Core>, entity: Entity) -> Self {
-    Self {
-      core,
-      entity,
-      timers: Vec::new(),
-    }
-  }
-
-  pub fn tick(&mut self, elapsed: u64) {
-    for timer in &mut self.timers {
-      timer.tick(elapsed);
-    }
-  }
-
-  pub async fn spawn<T: GenericIntoActor>(&mut self, actor: T) -> ActorRef<T> {
-    self.core.get_world().spawn_actor(actor, self.entity).await
-  }
-
-  pub async fn despawn(&self) {
-    self.core.get_world().despawn_actor(self.entity).await
-  }
-}
-
-pub struct TickComponent {
-  tick_fn: Arc<dyn Fn(Arc<Core>, Entity, u64) -> TraitFuture + Send + Sync + 'static>,
-}
-
-pub struct ParentComponent {
-  parent: Option<Entity>,
-  children: Vec<Entity>,
-}
-
-/// Defines an object that can be made into a specific spawned actor.
-pub trait GenericIntoActor: Send + Sync + 'static {
-  type Target: Actor + Send + Sync + 'static;
-
-  fn get_reserved_entity(&self) -> Option<Entity> {
-    None
-  }
-  fn get_children(&self, _out: &mut Vec<Entity>) {}
-  fn into_actor(self, _core: Arc<Core>, _entity: Entity) -> Self::Target;
-}
-#[async_trait]
-pub trait Actor: Component<Storage = PackedStorage<Self>> + Send + Sync {
-  fn get_core(&self) -> &Arc<Core> {
-    &self.get_ext().core
-  }
-
-  fn get_ext(&self) -> &ActorBaseExt;
-
-  fn get_ext_mut(&mut self) -> &mut ActorBaseExt;
-
-  async fn tick(&mut self, elapsed: u64);
-}
-
-pub struct ParentActor<T: GenericIntoActor> {
-  core: Arc<Core>,
-  children: Vec<Entity>,
-  reserved_entity: Entity,
-  actor: Option<T>,
-}
-
-impl<T: GenericIntoActor> ParentActor<T> {
-  pub async fn new(core: Arc<Core>) -> Self {
-    let reserved_entity = core.get_world().quick_reserve().await;
-    Self {
-      core,
-      reserved_entity,
-      actor: None,
-      children: Vec::new(),
-    }
-  }
-
-  pub fn update(&mut self, actor: T) {
-    self.actor = Some(actor);
-  }
-
-  pub async fn spawn_actor<A: GenericIntoActor>(&mut self, actor: A) -> ActorRef<A> {
-    self
-      .core
-      .get_world()
-      .spawn_actor(actor, self.reserved_entity)
-      .await
-  }
-}
-
-impl<T: GenericIntoActor> GenericIntoActor for ParentActor<T> {
-  type Target = T::Target;
-
-  fn get_children(&self, out: &mut Vec<Entity>) {
-    out.extend(self.children.clone());
-  }
-
-  fn into_actor(self, core: Arc<Core>, entity: Entity) -> T::Target {
-    self.actor.unwrap().into_actor(core, entity)
-  }
-}
-
-/// A typed actor reference to an spawned entity.
-pub struct ActorRef<T: GenericIntoActor> {
-  pub(crate) entity: Entity,
-  pub(crate) _m: PhantomData<T>,
-}
-
-impl<T: GenericIntoActor> ActorRef<T> {
-  #[allow(clippy::needless_lifetimes)]
-  pub async fn read<'a>(&self, core: &'a Core) -> ActorRefGuard<'a, T::Target> {
-    let world = core.get_world().world.write().await;
-
-    ActorRefGuard {
-      inner_world_lock: world,
-      entity: self.entity,
-      _m: PhantomData::<T::Target> {},
-    }
-  }
-
-  #[allow(clippy::needless_lifetimes)]
-  pub async fn write<'a>(&self, core: &'a Core) -> ActorMutRefGuard<'a, T::Target> {
-    let world = core.get_world().world.write().await;
-
-    ActorMutRefGuard {
-      inner_world_lock: world,
-      entity: self.entity,
-      _m: PhantomData::<T::Target> {},
-    }
-  }
-}
-
-pub struct ActorMutRefGuard<'a, T> {
-  inner_world_lock: AsyncRwLockWriteGuard<'a, LegionWorld>,
-  entity: Entity,
-  _m: PhantomData<T>,
-}
-
-impl<'a, T: Send + Sync + 'static> ActorMutRefGuard<'a, T> {
-  pub fn actor_mut(&mut self) -> OwningRefMut<Box<EntryMut<'_>>, T> {
-    self.component_mut::<T>()
-  }
-
-  pub fn add_component<C: Send + Sync + 'static>(&mut self, component: C) {
-    let mut entry = self.inner_world_lock.entry(self.entity).unwrap();
-    entry.add_component(component);
-  }
-
-  pub fn remove_component<C: Send + Sync + 'static>(&mut self) {
-    let mut entry = self.inner_world_lock.entry(self.entity).unwrap();
-    entry.remove_component::<C>();
-  }
-
-  pub fn component_mut<C: Send + Sync + 'static>(&mut self) -> OwningRefMut<Box<EntryMut<'_>>, C> {
-    let entry = self.inner_world_lock.entry_mut(self.entity).unwrap();
-    OwningRefMut::new(Box::new(entry)).map_mut(|entry| entry.get_component_mut::<C>().unwrap())
-  }
-}
-
-pub struct ActorRefGuard<'a, T> {
-  inner_world_lock: AsyncRwLockWriteGuard<'a, LegionWorld>,
-  entity: Entity,
-  _m: PhantomData<T>,
-}
-
-impl<'a, T: Send + Sync + 'static> ActorRefGuard<'a, T> {
-  pub fn actor(&'a mut self) -> OwningRef<Box<Entry<'a>>, T> {
-    self.component::<T>()
-  }
-
-  pub fn component<C: Send + Sync + 'static>(&'a mut self) -> OwningRef<Box<Entry<'a>>, C> {
-    let entry = self.inner_world_lock.entry(self.entity).unwrap();
-    OwningRef::new(Box::new(entry)).map(|entry| entry.get_component::<C>().unwrap())
-  }
-}
-
 pub trait SystemFactory: Send + Sync + 'static {
   fn create_system(&self) -> WrappedSystem;
+}
+
+impl<F: Fn() -> Box<dyn ParallelRunnable> + Send + Sync + 'static> SystemFactory for F {
+  fn create_system(&self) -> WrappedSystem {
+    WrappedSystem(self())
+  }
 }
 
 pub type TraitFuture = Pin<Box<dyn Future<Output = ()>>>;
@@ -467,6 +179,10 @@ pub trait WorldScheduler {
   fn schedule(&self, task: TraitFuture) -> TraitFuture;
   fn schedule_bg(&self, task: TraitFuture) -> TraitFuture;
 }
+
+use legion::storage::*;
+use legion::systems::*;
+use legion::world::*;
 
 pub struct WrappedSystem(pub Box<dyn ParallelRunnable>);
 impl Runnable for WrappedSystem {
@@ -516,4 +232,256 @@ impl SystemStage {
       SystemStage::Rendering => u8::MAX as usize + 3,
     }
   }
+}
+
+/// Spawnable defines an data type that can be spawned into the ecs world.
+pub trait Spawnable: Sized {
+  fn spawn(self, parent: Option<Entity>, level: usize, cmd: &mut CommandBuffer) -> ActorRc<Self>;
+}
+
+pub struct UnlockedSpawn<'a, T: Spawnable> {
+  entity: &'a Entity,
+  spawn: &'a T,
+  actor: &'a Actor,
+  cmd: &'a mut CommandBuffer,
+}
+
+impl<'a, T: Spawnable> UnlockedSpawn<'a, T> {
+  pub fn new(
+    actor: &'a Actor,
+    entity: &'a Entity,
+    spawn: &'a T,
+    cmd: &'a mut CommandBuffer,
+  ) -> Self {
+    Self {
+      entity,
+      spawn,
+      cmd,
+      actor,
+    }
+  }
+
+  pub fn spawn_actor<S: Spawnable>(&mut self, s: S) -> ActorRc<S> {
+    s.spawn(Some(*self.entity), self.actor.level + 1, self.cmd)
+  }
+
+  pub fn add_component<C: Component>(&mut self, c: C) {
+    self.cmd.add_component(*self.entity, c);
+  }
+
+  pub fn remove_component<C: Component>(&mut self) {
+    self.cmd.remove_component::<C>(*self.entity);
+  }
+}
+
+impl<'a, T: Spawnable> std::ops::Deref for UnlockedSpawn<'a, T> {
+  type Target = T;
+  fn deref(&self) -> &Self::Target {
+    self.spawn
+  }
+}
+
+pub struct UnlockedSpawnMut<'a, T: Spawnable> {
+  entity: &'a Entity,
+  spawn: &'a mut T,
+  actor: &'a Actor,
+  cmd: &'a mut CommandBuffer,
+}
+
+impl<'a, T: Spawnable> UnlockedSpawnMut<'a, T> {
+  pub fn new(
+    actor: &'a Actor,
+    entity: &'a Entity,
+    spawn: &'a mut T,
+    cmd: &'a mut CommandBuffer,
+  ) -> Self {
+    Self {
+      entity,
+      spawn,
+      cmd,
+      actor,
+    }
+  }
+
+  pub fn spawn_actor<S: Spawnable>(&mut self, s: S) -> ActorRc<S> {
+    s.spawn(Some(*self.entity), self.actor.level + 1, self.cmd)
+  }
+
+  pub fn add_component<C: Component>(&mut self, c: C) {
+    self.cmd.add_component(*self.entity, c);
+  }
+
+  pub fn remove_component<C: Component>(&mut self) {
+    self.cmd.remove_component::<C>(*self.entity);
+  }
+}
+
+impl<'a, T: Spawnable> std::ops::Deref for UnlockedSpawnMut<'a, T> {
+  type Target = T;
+  fn deref(&self) -> &Self::Target {
+    self.spawn
+  }
+}
+
+impl<'a, T: Spawnable> std::ops::DerefMut for UnlockedSpawnMut<'a, T> {
+  fn deref_mut(&mut self) -> &mut Self::Target {
+    self.spawn
+  }
+}
+
+pub struct WeakSpawn<T: Spawnable> {
+  cmd: CommandBuffer,
+  entity: Entity,
+  level: usize,
+  _p: PhantomData<T>,
+}
+
+impl<T: Spawnable + Send + Sync + 'static> WeakSpawn<T> {
+  pub fn new(entity: Entity, level: usize) -> Self {
+    Self {
+      entity,
+      level,
+      cmd: CommandBuffer::new(&Core::get_instance().get_world().world),
+      _p: PhantomData {},
+    }
+  }
+
+  pub fn spawn_actor<S: Spawnable>(&mut self, s: S) -> ActorRc<S> {
+    s.spawn(Some(self.entity), self.level + 1, &mut self.cmd)
+  }
+
+  pub fn add_component<C: Component>(&mut self, c: C) {
+    self.cmd.add_component(self.entity, c);
+  }
+
+  pub fn remove_component<C: Component>(&mut self) {
+    self.cmd.remove_component::<C>(self.entity);
+  }
+
+  pub fn exec_mut<F: 'static + Fn(&mut UnlockedWeakSpawn<'_, T>) + Send + Sync>(&mut self, f: F) {
+    let entity = self.entity;
+    self.cmd.exec_mut(move |world, _| {
+      let entry = world.entry(entity).unwrap();
+      let mut unlocked = UnlockedWeakSpawn {
+        entry,
+        _p: PhantomData {},
+      };
+      f(&mut unlocked);
+    });
+  }
+
+  pub fn flush(self) {
+    Core::get_instance()
+      .get_world()
+      .add_command_buffer(self.cmd);
+  }
+}
+
+pub struct UnlockedWeakSpawn<'a, T: Spawnable> {
+  entry: Entry<'a>,
+  _p: PhantomData<T>,
+}
+
+impl<'a, T: Spawnable> UnlockedWeakSpawn<'a, T> {
+  pub fn get_component<C: Component>(&self) -> Result<&C, ComponentError> {
+    self.entry.get_component::<C>()
+  }
+
+  pub fn get_component_mut<C: Component>(&mut self) -> Result<&mut C, ComponentError> {
+    self.entry.get_component_mut::<C>()
+  }
+
+  pub fn add_component<C: Component>(&mut self, c: C) {
+    self.entry.add_component(c)
+  }
+
+  pub fn remove_component<C: Component>(&mut self) {
+    self.entry.remove_component::<C>()
+  }
+}
+
+impl<'a, T: Spawnable + Send + Sync + 'static> std::ops::Deref for UnlockedWeakSpawn<'a, T> {
+  type Target = T;
+  fn deref(&self) -> &Self::Target {
+    self.entry.get_component::<T>().unwrap()
+  }
+}
+
+impl<'a, T: Spawnable + Send + Sync + 'static> std::ops::DerefMut for UnlockedWeakSpawn<'a, T> {
+  fn deref_mut(&mut self) -> &mut Self::Target {
+    self.entry.get_component_mut::<T>().unwrap()
+  }
+}
+
+/// Base actor component added to _all_ spawned actors during runtime.
+pub struct Actor {
+  /// The entity id of the parent of the spawned actor if available.
+  pub parent: Option<Entity>,
+  /// The level of the spawned actor.
+  pub level: usize,
+  #[doc(hidden)]
+  pub timers: Vec<Timer>,
+}
+
+// Actor reference collection and actor despawning on drop.
+// -----------------------------------------------------------------------------
+
+pub struct ActorRc<T> {
+  inner: Arc<ActorInnerRef>,
+  _p: PhantomData<T>,
+}
+
+impl<T> Clone for ActorRc<T> {
+  fn clone(&self) -> Self {
+    Self {
+      inner: self.inner.clone(),
+      _p: PhantomData {},
+    }
+  }
+}
+
+impl<T: Send + Sync + 'static> ActorRc<T> {
+  pub fn new(
+    cmd: &mut CommandBuffer,
+    value: T,
+    parent: Option<Entity>,
+    level: usize,
+    timers: Vec<Timer>,
+  ) -> Self {
+    let entity = cmd.push((
+      value,
+      Actor {
+        level,
+        parent,
+        timers,
+      },
+    ));
+    ActorRc {
+      inner: Arc::new(ActorInnerRef { entity }),
+      _p: PhantomData {},
+    }
+  }
+
+  pub fn get_entity(&self) -> Entity {
+    self.inner.entity
+  }
+}
+
+struct ActorInnerRef {
+  entity: Entity,
+}
+pub struct WrappedEntity(pub Entity);
+
+impl Drop for ActorInnerRef {
+  fn drop(&mut self) {
+    let world = Core::get_instance().get_world();
+    world.add_temp_system(Box::new(actor_drop_system_system(WrappedEntity(
+      self.entity,
+    ))));
+  }
+}
+
+#[system]
+fn actor_drop_system(#[state] entity: &WrappedEntity, cmd: &mut CommandBuffer) {
+  cmd.remove(entity.0);
 }

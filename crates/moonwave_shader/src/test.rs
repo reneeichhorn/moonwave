@@ -8,7 +8,6 @@ mod moonwave_shader {
 #[vertex]
 struct SampleVertex {
   position: Vector3<f32>,
-  uv: Vector2<f32>,
 }
 
 #[test]

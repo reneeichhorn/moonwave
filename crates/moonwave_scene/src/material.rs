@@ -36,7 +36,8 @@ impl<T: VertexStruct + 'static> Material<T> {
     }
   }
 
-  pub(crate) async fn build(&mut self, core: &Core) -> BuiltMaterial {
+  pub(crate) fn build(&mut self) -> BuiltMaterial {
+    let core = Core::get_instance();
     if let Some(built) = &self.built {
       return built.clone();
     }
@@ -102,18 +103,16 @@ impl<T: VertexStruct + 'static> Material<T> {
     let built = graph.build(&self.color_outs);
     let vertex_shader = core
       .create_shader_from_glsl(built.vs.as_str(), "material_vs", ShaderKind::Vertex)
-      .await
       .unwrap();
     let fragment_shader = core
-      .create_shader_from_glsl(built.vs.as_str(), "material_fs", ShaderKind::Fragment)
-      .await
+      .create_shader_from_glsl(built.fs.as_str(), "material_fs", ShaderKind::Fragment)
       .unwrap();
 
     // Create layout
     let desc = PipelineLayoutDescriptor::new()
-      .add_binding(CameraUniform::get_bind_group_lazy(core))
-      .add_binding(ModelUniform::get_bind_group_lazy(core));
-    let layout = core.create_pipeline_layout(desc).await;
+      .add_binding(CameraUniform::get_bind_group_lazy())
+      .add_binding(ModelUniform::get_bind_group_lazy());
+    let layout = core.create_pipeline_layout(desc);
 
     self.built = Some(BuiltMaterial {
       vertex_shader,

@@ -18,3 +18,4 @@ crevice = { path = "../thirdparty/crevice" }
 [dev-dependencies]
 insta = "1.5"
 moonwave_core = { path = "../moonwave_core" }
+moonwave_scene = { path = "../moonwave_scene" }

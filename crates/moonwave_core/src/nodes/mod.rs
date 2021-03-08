@@ -1,5 +1,4 @@
 use crate::Core;
-use futures::executor::block_on;
 use moonwave_common::Vector2;
 use moonwave_render::{CommandEncoder, CommandEncoderOutput, FrameGraphNode, FrameNodeValue};
 use moonwave_resources::{ResourceRc, Texture, TextureFormat, TextureUsage, TextureView};
@@ -50,37 +49,34 @@ pub enum TextureSize {
 }
 
 impl TextureSize {
-  fn get_actual_size(&self, core: &Core) -> Vector2<u32> {
+  fn get_actual_size(&self) -> Vector2<u32> {
     match self {
-      TextureSize::Custom(size) => size.clone(),
-      TextureSize::FullScreen => core.get_swap_chain_size(),
+      TextureSize::Custom(size) => *size,
+      TextureSize::FullScreen => Core::get_instance().get_swap_chain_size(),
     }
   }
 }
 
 pub struct TextureGeneratorHost {
-  core: Arc<Core>,
   size: TextureSize,
   format: TextureFormat,
   active: Mutex<(Vector2<u32>, ResourceRc<Texture>, ResourceRc<TextureView>)>,
 }
 
 impl TextureGeneratorHost {
-  pub async fn new(core: Arc<Core>, size: TextureSize, format: TextureFormat) -> Arc<Self> {
-    let actual_size = size.get_actual_size(&*core);
-    let texture = core
-      .create_texture(
-        None,
-        TextureUsage::RENDER_ATTACHMENT | TextureUsage::SAMPLED,
-        format,
-        actual_size,
-        1,
-      )
-      .await;
-    let view = core.create_texture_view(texture.clone()).await;
+  pub fn new(size: TextureSize, format: TextureFormat) -> Arc<Self> {
+    let core = Core::get_instance();
+    let actual_size = size.get_actual_size();
+    let texture = core.create_texture(
+      None,
+      TextureUsage::RENDER_ATTACHMENT | TextureUsage::SAMPLED,
+      format,
+      actual_size,
+      1,
+    );
+    let view = core.create_texture_view(texture.clone());
 
     Arc::new(Self {
-      core,
       format,
       size,
       active: Mutex::new((actual_size, texture, view)),
@@ -106,23 +102,19 @@ impl FrameGraphNode for TextureGeneratorNode {
     _encoder: &mut CommandEncoder,
   ) {
     // Recreate texture if resolution changed.
-    let size = self.0.size.get_actual_size(&*self.0.core);
+    let size = self.0.size.get_actual_size();
     let mut active = self.0.active.lock();
     if size != active.0 {
-      let core = self.0.core.clone();
-      block_on(async {
-        let texture = core
-          .create_texture(
-            None,
-            TextureUsage::RENDER_ATTACHMENT | TextureUsage::SAMPLED,
-            self.0.format,
-            size,
-            1,
-          )
-          .await;
-        let view = core.create_texture_view(texture.clone()).await;
-        *active = (size, texture, view);
-      });
+      let core = Core::get_instance();
+      let texture = core.create_texture(
+        None,
+        TextureUsage::RENDER_ATTACHMENT | TextureUsage::SAMPLED,
+        self.0.format,
+        size,
+        1,
+      );
+      let view = core.create_texture_view(texture.clone());
+      *active = (size, texture, view);
     }
 
     // Output

@@ -191,6 +191,7 @@ impl ShaderGraph {
     // Vertex shader.
     {
       optick::event!("ShaderGraph::generate_vertex_shader");
+      vertex_shader_code += "#version 450\n\n";
 
       // Vertex attributes
       for attr in &self.vertex_attributes {
@@ -234,6 +235,7 @@ impl ShaderGraph {
     // Fragment shader
     {
       optick::event!("ShaderGraph::generate_fragment_shader");
+      fragment_shader_code += "#version 450\n\n";
 
       // Shared attributes for fragment shader.
       for (index, (ty, name)) in shared_attributes.iter().enumerate() {
@@ -285,6 +287,9 @@ impl ShaderGraph {
       fragment_shader_code += "}\n";
     }
 
+    println!("VS: {}\n\n", vertex_shader_code);
+    println!("FS: {}\n\n", fragment_shader_code);
+
     BuiltShaderGraph {
       vs: vertex_shader_code,
       fs: fragment_shader_code,
@@ -294,7 +299,7 @@ impl ShaderGraph {
 
   fn generate_uniform(uniform: &BuiltUniform, output: &mut String) {
     *output += format!(
-      "layout (binding = {}) uniform {}_block {{\n",
+      "layout (set = {}, binding = 0) uniform {}_block {{\n",
       uniform.binding, uniform.name
     )
     .as_str();
@@ -433,7 +438,8 @@ impl ShaderNode for VertexAttributesNode {
   fn generate(&self, _inputs: &[Option<String>], outputs: &[Option<String>], output: &mut String) {
     for (index, attribute) in self.attributes.iter().enumerate() {
       *output += format!(
-        "{} = a_{};\n",
+        "{} {} = a_{};\n",
+        ShaderType::from(attribute.format).get_glsl_type(),
         outputs[index].as_ref().unwrap(),
         attribute.name
       )
