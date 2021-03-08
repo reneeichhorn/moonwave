@@ -293,6 +293,24 @@ impl FrameGraph {
               let label = format!("NodeCommandEncoder_{}", node.name);
 
               // Map outputs -> inputs.
+              /*
+              for (idx, input) in inputs.iter().enumerate() {
+                if let Some((target_level, output_index, node_index)) = input {
+                  let i = cache.get(&node_index).unwrap();
+                  println!(
+                    "Mapping input #{} to level = {} ({}) and index = {} ({}, {})",
+                    idx,
+                    target_level,
+                    previous_outputs.len() - (target_level - level),
+                    i * MAX_INPUT_OUTPUTS_PER_NODE + output_index,
+                    i,
+                    output_index
+                  );
+                } else {
+                  println!("Mapping input #{} to None", i);
+                }
+              }
+              */
               let inputs = inputs
                 .iter()
                 .map(|input| {

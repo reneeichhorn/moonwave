@@ -44,7 +44,7 @@ impl Camera {
       fov_y: std::f32::consts::FRAC_PI_4,
       aspect: 1.0,
       position: Vector3::new(0.0, 0.0, 0.0),
-      target: Vector3::new(0.0, 0.0, 0.0),
+      target: Vector3::new(0.0, 0.0, 1.0),
       up: Vector3::new(0.0, 1.0, 0.0),
       uniform: Uniform::new(CameraUniform {
         projection: Matrix4::identity(),
@@ -72,4 +72,5 @@ fn update_camera_matrices(camera: &Camera) {
   uniform.view = view;
   uniform.projection = projection;
   uniform.projection_view = projection_view;
+  //println!("Cam {:?}", uniform.projection);
 }

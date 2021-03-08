@@ -1,7 +1,11 @@
 use moonwave_common::Vector2;
 use moonwave_render::{DeviceHost, FrameGraph};
 use std::{
-  sync::{Arc, RwLock},
+  iter::Once,
+  sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, RwLock,
+  },
   time::Instant,
 };
 
@@ -141,6 +145,8 @@ impl Core {
       );
       drop(swap_frame);
     }
+
+    CURRENT_FRAME.fetch_add(1, Ordering::Relaxed);
 
     Ok(())
   }
@@ -500,4 +506,26 @@ impl DeviceHost for Core {
 
 pub trait BindGroupLayoutSingleton {
   fn get_bind_group_lazy() -> ResourceRc<BindGroupLayout>;
+}
+
+static CURRENT_FRAME: AtomicU64 = AtomicU64::new(0);
+
+pub struct OnceInFrame {
+  last_execution: AtomicU64,
+}
+impl OnceInFrame {
+  pub fn new() -> Self {
+    Self {
+      last_execution: AtomicU64::new(0),
+    }
+  }
+
+  pub fn once<F: Fn()>(&self, f: F) {
+    let last_execution = self.last_execution.load(Ordering::Relaxed);
+    let current = CURRENT_FRAME.load(Ordering::Relaxed);
+    if current > last_execution {
+      self.last_execution.store(last_execution, Ordering::Relaxed);
+      f();
+    }
+  }
 }

@@ -14,8 +14,8 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 
 use crate::{
-  BuiltMaterial, Camera, CameraUniform, DynamicUniformNode, MainCameraTag, Material, Mesh,
-  MeshIndex, MeshVertex, Model,
+  BuiltMaterial, Camera, CameraUniform, DynamicUniformNode, GenericUniform, MainCameraTag,
+  Material, Mesh, MeshIndex, MeshVertex, Model,
 };
 
 static REGISTERED_SYSTEM: std::sync::Once = std::sync::Once::new();
@@ -28,7 +28,6 @@ pub struct StaticMeshRenderer {
   indices: u32,
   index_buffer: ResourceRc<Buffer>,
   index_format: IndexFormat,
-  bind_groups: Vec<ResourceRc<BindGroupLayout>>,
   material: BuiltMaterial,
   cache: Arc<Mutex<StaticMeshRendererCache>>,
 }
@@ -66,7 +65,6 @@ impl StaticMeshRenderer {
       material,
       index_format: I::get_format(),
       cache: Arc::new(Mutex::new(StaticMeshRendererCache::Empty)),
-      bind_groups: Vec::new(),
     }
   }
 }
@@ -85,13 +83,13 @@ pub fn create_pbr_frame_graph(world: &mut SubWorld) {
   optick::event!("create_pbr_frame_graph");
 
   // Get main camera and its frame node.
-  let main_cam_node = {
+  let main_cam_uniform = {
     let mut main_cam_query = <(&Camera, &MainCameraTag)>::query();
     let (main_cam, _) = main_cam_query
       .iter(world)
       .next()
       .unwrap_or_else(|| panic!("No main camera found in scene"));
-    main_cam.uniform.lazy_get_frame_node()
+    main_cam.uniform.clone()
   };
 
   // Query all static meshes
@@ -138,7 +136,7 @@ pub fn create_pbr_frame_graph(world: &mut SubWorld) {
         vertex_buffer: obj.vertex_buffer.clone(),
         index_buffer: obj.index_buffer.clone(),
         indices: obj.indices,
-        bind_group_indices: vec![0, 1],
+        uniforms: vec![main_cam_uniform.as_generic(), model.uniform.as_generic()],
       })
     })
     .collect::<Vec<_>>();
@@ -183,14 +181,6 @@ pub fn create_pbr_frame_graph(world: &mut SubWorld) {
       PBRRenderGraphNode::INPUT_DEPTH,
     )
     .unwrap();
-  frame_graph
-    .connect(
-      main_cam_node,
-      DynamicUniformNode::<CameraUniform>::OUTPUT_BIND_GROUP,
-      pbr_node,
-      PBRRenderGraphNode::INPUT_BIND_GROUPS,
-    )
-    .unwrap();
 }
 struct CreatePBRFrameGraphSystem;
 impl SystemFactory for CreatePBRFrameGraphSystem {
@@ -207,7 +197,7 @@ struct SingleRenderObject {
   vertex_buffer: ResourceRc<Buffer>,
   index_buffer: ResourceRc<Buffer>,
   index_format: IndexFormat,
-  bind_group_indices: Vec<u8>,
+  uniforms: Vec<GenericUniform>,
   indices: u32,
 }
 impl PBRRenderGraphNode {
@@ -226,6 +216,14 @@ impl FrameGraphNode for PBRRenderGraphNode {
   ) {
     optick::event!("FrameGraph::PBR");
 
+    // Prepare uniforms
+    let uniforms = self
+      .objects
+      .iter()
+      .flat_map(|object| object.uniforms.iter())
+      .map(|uniform| uniform.get_resources(encoder).bind_group.clone())
+      .collect::<Vec<_>>();
+
     // Create render pass.
     let mut rpb = RenderPassCommandEncoderBuilder::new("pbr_rp");
     rpb.add_color_output(
@@ -243,21 +241,15 @@ impl FrameGraphNode for PBRRenderGraphNode {
     );
     let mut rp = encoder.create_render_pass_encoder(rpb);
 
+    let mut uniform_index = 0;
     for object in &self.objects {
-      // Get all bind groups needed for this call.
-      let bind_groups = object.bind_group_indices.iter().map(|index| {
-        inputs[Self::INPUT_BIND_GROUPS + *index as usize]
-          .as_ref()
-          .unwrap()
-          .get_bind_group()
-      });
-
       // Do the rendering in order.
       rp.set_vertex_buffer(object.vertex_buffer.clone());
       rp.set_index_buffer(object.index_buffer.clone(), object.index_format);
       rp.set_pipeline(object.pipeline.clone());
-      for (index, g) in bind_groups.enumerate() {
-        rp.set_bind_group(index as u32, g.clone());
+      for (index, _uniform) in object.uniforms.iter().enumerate() {
+        rp.set_bind_group(index as u32, uniforms[uniform_index].clone());
+        uniform_index += 1;
       }
       rp.render_indexed(0..object.indices);
     }

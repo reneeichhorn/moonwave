@@ -287,9 +287,6 @@ impl ShaderGraph {
       fragment_shader_code += "}\n";
     }
 
-    println!("VS: {}\n\n", vertex_shader_code);
-    println!("FS: {}\n\n", fragment_shader_code);
-
     BuiltShaderGraph {
       vs: vertex_shader_code,
       fs: fragment_shader_code,

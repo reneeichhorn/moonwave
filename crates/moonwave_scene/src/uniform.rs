@@ -1,21 +1,22 @@
-use moonwave_core::{BindGroupLayoutSingleton, Core};
+use moonwave_core::{BindGroupLayoutSingleton, Core, OnceInFrame};
 use moonwave_render::{CommandEncoder, FrameGraphNode, FrameNodeValue, Index};
 use moonwave_resources::{BindGroup, BindGroupDescriptor, Buffer, BufferUsage, ResourceRc};
 use moonwave_shader::UniformStruct;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::sync::{
-  atomic::{AtomicBool, Ordering},
-  Arc,
+use std::{
+  process::Command,
+  sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+  },
 };
 
 #[derive(Clone)]
 pub struct Uniform<T: UniformStruct> {
   content: Arc<RwLock<T>>,
-  frame_node: Arc<RwLock<Option<Index>>>,
   staging_buffer: ResourceRc<Buffer>,
-  buffer: ResourceRc<Buffer>,
   is_dirty: Arc<AtomicBool>,
-  bind_group: ResourceRc<BindGroup>,
+  resources: Arc<PubUniformResources>,
 }
 
 impl<T: UniformStruct + BindGroupLayoutSingleton + Send + Sync + 'static> Uniform<T> {
@@ -43,11 +44,9 @@ impl<T: UniformStruct + BindGroupLayoutSingleton + Send + Sync + 'static> Unifor
     );
 
     Self {
-      buffer,
+      resources: Arc::new(PubUniformResources { buffer, bind_group }),
       staging_buffer,
-      bind_group,
       content: Arc::new(RwLock::new(initial)),
-      frame_node: Arc::new(RwLock::new(None)),
       is_dirty: Arc::new(AtomicBool::new(true)),
     }
   }
@@ -61,32 +60,51 @@ impl<T: UniformStruct + BindGroupLayoutSingleton + Send + Sync + 'static> Unifor
   }
 
   pub fn get_bind_group(&self) -> ResourceRc<BindGroup> {
-    self.bind_group.clone()
+    self.resources.bind_group.clone()
   }
 
-  pub fn lazy_get_frame_node(&self) -> Index {
-    let mut node = self.frame_node.write();
-    if let Some(node) = *node {
-      return node;
+  pub fn as_generic(&self) -> GenericUniform {
+    let content = if self.is_dirty.swap(false, Ordering::Relaxed) {
+      Some(self.content.read().generate_raw_u8())
+    } else {
+      None
+    };
+
+    GenericUniform {
+      content,
+      resources: self.resources.clone(),
+      staging_buffer: self.staging_buffer.clone(),
+    }
+  }
+}
+
+pub struct GenericUniform {
+  content: Option<Vec<u8>>,
+  staging_buffer: ResourceRc<Buffer>,
+  resources: Arc<PubUniformResources>,
+}
+
+impl GenericUniform {
+  pub fn get_resources(&self, cmd: &mut CommandEncoder) -> &PubUniformResources {
+    if let Some(data) = &self.content {
+      // Update staging buffer.
+      cmd.write_buffer(&self.staging_buffer, &data);
+
+      // Update actual buffer
+      cmd.copy_buffer_to_buffer(
+        &self.staging_buffer,
+        &self.resources.buffer,
+        data.len() as u64,
+      )
     }
 
-    let name = T::generate_name();
-    let node_index = Core::get_instance().get_frame_graph().add_node(
-      DynamicUniformNode {
-        buffer: self.buffer.clone(),
-        buffer_staging: self.staging_buffer.clone(),
-        bind_group: self.bind_group.clone(),
-        content: if self.is_dirty.load(Ordering::Relaxed) {
-          Some(self.content.clone())
-        } else {
-          None
-        },
-      },
-      format!("Uniform_{}", name).as_str(),
-    );
-    *node = Some(node_index);
-    node_index
+    &self.resources
   }
+}
+
+pub struct PubUniformResources {
+  pub buffer: ResourceRc<Buffer>,
+  pub bind_group: ResourceRc<BindGroup>,
 }
 
 pub struct DynamicUniformNode<T: UniformStruct> {

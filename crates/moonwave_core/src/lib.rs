@@ -11,7 +11,7 @@ mod nodes;
 mod service;
 
 pub use application::*;
-pub use base::{BindGroupLayoutSingleton, Core, ShaderKind, TaskKind};
+pub use base::{BindGroupLayoutSingleton, Core, OnceInFrame, ShaderKind, TaskKind};
 pub use ecs::*;
 pub use extension::*;
 pub use logger::*;
