@@ -1,5 +1,5 @@
 use legion::systems::ParallelRunnable;
-use moonwave_common::{Matrix4, Vector3};
+use moonwave_common::*;
 use moonwave_core::{system, Core, SystemStage};
 use moonwave_shader::uniform;
 
@@ -58,11 +58,19 @@ impl Camera {
 #[system(par_for_each)]
 fn update_camera_matrices(camera: &Camera) {
   // Build projection
-  let projection =
-    Matrix4::new_perspective(camera.aspect, camera.fov_y, camera.z_near, camera.z_far);
+  let projection = perspective(
+    Rad(camera.fov_y),
+    camera.aspect,
+    camera.z_near,
+    camera.z_far,
+  );
 
   // Build view matrix
-  let view = Matrix4::look_at_lh(&camera.position.into(), &camera.target.into(), &camera.up);
+  let view = Matrix4::look_at_rh(
+    Point3::from_vec(camera.position),
+    Point3::from_vec(camera.target),
+    camera.up,
+  );
 
   // Build together
   let projection_view = projection * view;

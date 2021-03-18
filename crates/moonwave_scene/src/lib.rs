@@ -17,3 +17,9 @@ pub use material::*;
 
 mod pbr;
 pub use pbr::*;
+
+mod time;
+pub use time::*;
+
+mod texture;
+pub use texture::*;

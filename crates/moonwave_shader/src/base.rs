@@ -1,13 +1,11 @@
-use moonwave_common::{storage::ContiguousStorage, *};
-
 use crate::*;
 
 pub struct Constant(Vec<f32>, ShaderType);
 impl Constant {
   pub const OUTPUT: usize = 0;
 
-  pub fn new<R: Dim, C: Dim, S: ContiguousStorage<f32, R, C>>(value: Matrix<f32, R, C, S>) -> Self {
-    let values = value.as_slice().to_vec();
+  pub fn new<V: std::ops::Index<std::ops::RangeFull, Output = [f32]>>(value: V) -> Self {
+    let values = value.index(..).to_vec();
     let ty = match values.len() {
       4 => ShaderType::Float4,
       3 => ShaderType::Float3,

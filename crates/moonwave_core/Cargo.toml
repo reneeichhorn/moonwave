@@ -31,3 +31,4 @@ generational-arena = "0.2"
 owning_ref = "0.4.1"
 async-trait = "0.1"
 once_cell = "1.5"
+wgpu-mipmap = { path = "../thirdparty/wgpu-mipmap" }

@@ -6,9 +6,12 @@ edition = "2018"
 
 [dependencies]
 parking_lot = "0.11"
+lazy_static = "1.4"
 moonwave_core = { path = "../moonwave_core" }
 moonwave_common = { path = "../moonwave_common" }
 moonwave_resources = { path = "../moonwave_resources" }
 moonwave_shader = { path = "../moonwave_shader" }
 moonwave_render = { path = "../moonwave_render" }
 legion = "0.4"
+image = "0.23"
+thiserror = "1.0"

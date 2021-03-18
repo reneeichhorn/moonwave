@@ -19,6 +19,22 @@ impl<T: MeshVertex, I: MeshIndex> Mesh<T, I> {
     }
   }
 
+  pub fn new_merged<'a>(groups: impl Iterator<Item = &'a Self>) -> Self {
+    let mut merged = Mesh::new();
+    let mut offset = 0;
+
+    for mesh in groups {
+      merged.vertices.extend(&mesh.vertices);
+      merged
+        .indices
+        .extend(mesh.indices.iter().map(|i| i.with_offset(offset)));
+
+      offset += mesh.vertices.len();
+    }
+
+    merged
+  }
+
   pub fn push_vertex(&mut self, vertex: T) {
     self.vertices.push(vertex);
   }
@@ -56,14 +72,21 @@ pub trait MeshVertex: Zeroable + Pod + VertexStruct {
 }
 
 pub trait MeshIndex: Pod {
+  fn with_offset(self, offset: usize) -> Self;
   fn get_format() -> IndexFormat;
 }
 impl MeshIndex for u16 {
+  fn with_offset(self, offset: usize) -> Self {
+    self + offset as u16
+  }
   fn get_format() -> IndexFormat {
     IndexFormat::Uint16
   }
 }
 impl MeshIndex for u32 {
+  fn with_offset(self, offset: usize) -> Self {
+    self + offset as u32
+  }
   fn get_format() -> IndexFormat {
     IndexFormat::Uint32
   }

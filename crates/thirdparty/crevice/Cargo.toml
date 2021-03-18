@@ -18,9 +18,9 @@ crevice-derive = { path = "../crevice-derive" }
 bytemuck = "1.4.1"
 mint = "0.5.5"
 nalgebra = "0.18"
+cgmath = { version = "0.18.0", features = ["mint"] }
 
 [dev-dependencies]
-cgmath = { version = "0.17.0", features = ["mint"] }
 insta = "0.16.1"
 type-layout = { version = "0.2.0", features = ["serde1"] }
 crevice-derive = { path = "../crevice-derive", features = ["test_type_layout"] }

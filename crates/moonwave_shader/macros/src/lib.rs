@@ -2,6 +2,7 @@ use heck::{ShoutySnakeCase, SnakeCase};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{parse_macro_input, GenericArgument, ItemStruct, Path, PathArguments, Type};
+use uuid::Uuid;
 
 fn path_to_string(path: &Path) -> String {
   path
@@ -209,6 +210,8 @@ pub fn uniform(_attr: TokenStream, item: TokenStream) -> TokenStream {
     });
   }
 
+  let uuid = Uuid::new_v4().to_u128_le();
+
   TokenStream::from(quote! {
     #[repr(C)]
     #[derive(Copy, Clone, Debug, moonwave_shader::std140::AsStd140)]
@@ -219,6 +222,10 @@ pub fn uniform(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     impl moonwave_shader::UniformStruct for #struct_ident {
+      fn get_id() -> moonwave_shader::Uuid {
+        moonwave_shader::Uuid::from_u128_le(#uuid)
+      }
+
       fn generate_raw_u8(&self) -> Vec<u8> {
         use moonwave_shader::{AsStd140, Std140};
         self.as_std140().as_bytes().to_vec()

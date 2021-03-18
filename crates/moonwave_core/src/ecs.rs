@@ -5,6 +5,7 @@ use itertools::Itertools;
 use legion::World as LegionWorld;
 use legion::*;
 pub use legion::{system, Entity};
+use once_cell::sync::OnceCell;
 use owning_ref::{OwningRef, OwningRefMut};
 use parking_lot::{Mutex, RwLock};
 use rayon::ThreadPool;
@@ -76,11 +77,11 @@ impl World {
   /// and replaces the active systems once done.
   fn rebuild_schedule(&self) {
     if !self.systems_dirty.load(Ordering::Acquire) {
-      self.systems_dirty.store(false, Ordering::Relaxed);
       return;
     }
 
     optick::event!("World::rebuild_schedule");
+    self.systems_dirty.store(false, Ordering::Relaxed);
 
     // Group by stage.
     let systems = self.systems.read();
@@ -130,10 +131,11 @@ impl World {
     }
 
     // Command buffers
+    #[allow(clippy::needless_collect)]
     {
       optick::event!("World::tick::command_buffers");
       let buffers = self.command_buffers.lock().drain(..).collect::<Vec<_>>();
-      for mut buffer in buffers {
+      for mut buffer in buffers.into_iter().rev() {
         buffer.flush(&mut self.world, &mut resources);
       }
     }
@@ -336,6 +338,27 @@ pub struct WeakSpawn<T: Spawnable> {
   _p: PhantomData<T>,
 }
 
+pub struct SubWeakSpawn<'a, T: Spawnable> {
+  cmd: &'a mut CommandBuffer,
+  entity: Entity,
+  _level: usize,
+  rc: ActorRc<T>,
+}
+
+impl<'a, T: Spawnable> SubWeakSpawn<'a, T> {
+  pub fn add_component<C: Component>(&mut self, c: C) {
+    self.cmd.add_component(self.entity, c);
+  }
+
+  pub fn remove_component<C: Component>(&mut self) {
+    self.cmd.remove_component::<C>(self.entity);
+  }
+
+  pub fn into_rc(self) -> ActorRc<T> {
+    self.rc
+  }
+}
+
 impl<T: Spawnable + Send + Sync + 'static> WeakSpawn<T> {
   pub fn new(entity: Entity, level: usize) -> Self {
     Self {
@@ -346,8 +369,14 @@ impl<T: Spawnable + Send + Sync + 'static> WeakSpawn<T> {
     }
   }
 
-  pub fn spawn_actor<S: Spawnable>(&mut self, s: S) -> ActorRc<S> {
-    s.spawn(Some(self.entity), self.level + 1, &mut self.cmd)
+  pub fn spawn_actor<S: Spawnable + Send + Sync + 'static>(&mut self, s: S) -> SubWeakSpawn<S> {
+    let actor = s.spawn(Some(self.entity), self.level + 1, &mut self.cmd);
+    SubWeakSpawn {
+      cmd: &mut self.cmd,
+      entity: actor.inner.entity,
+      rc: actor,
+      _level: self.level + 1,
+    }
   }
 
   pub fn add_component<C: Component>(&mut self, c: C) {
@@ -358,15 +387,23 @@ impl<T: Spawnable + Send + Sync + 'static> WeakSpawn<T> {
     self.cmd.remove_component::<C>(self.entity);
   }
 
-  pub fn exec_mut<F: 'static + Fn(&mut UnlockedWeakSpawn<'_, T>) + Send + Sync>(&mut self, f: F) {
+  pub fn exec_mut<F: 'static + FnOnce(&mut UnlockedWeakSpawn<'_, T>) + Send + Sync>(
+    &mut self,
+    f: F,
+  ) {
     let entity = self.entity;
+    let once = Mutex::new(Some(f));
+
     self.cmd.exec_mut(move |world, _| {
       let entry = world.entry(entity).unwrap();
       let mut unlocked = UnlockedWeakSpawn {
         entry,
         _p: PhantomData {},
       };
-      f(&mut unlocked);
+      let mut once_unlocked = once.lock();
+      if let Some(f) = once_unlocked.take() {
+        f(&mut unlocked);
+      }
     });
   }
 

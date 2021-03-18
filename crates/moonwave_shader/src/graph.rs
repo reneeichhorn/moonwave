@@ -1,6 +1,10 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use generational_arena::Arena;
-use moonwave_resources::VertexAttribute;
+use moonwave_resources::{BindGroup, VertexAttribute};
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::{ShaderType, UniformStruct, VertexStruct};
 
@@ -14,6 +18,7 @@ pub struct ShaderGraph {
   vertex_output_node: Option<Index>,
   color_outputs: Vec<(String, ShaderType, Index)>,
   uniforms: Vec<Uniform>,
+  textures: Vec<Texture>,
   nodes: Arena<Node>,
 }
 
@@ -24,8 +29,13 @@ impl ShaderGraph {
       color_outputs: Vec::new(),
       vertex_attributes: Vec::new(),
       uniforms: Vec::new(),
+      textures: Vec::new(),
       vertex_output_node: None,
     }
+  }
+
+  pub fn get_color_outputs(&self) -> &Vec<(String, ShaderType, Index)> {
+    &self.color_outputs
   }
 
   pub fn add_vertex_attributes<T: VertexStruct + 'static>(&mut self) -> (Index, Index) {
@@ -38,6 +48,12 @@ impl ShaderGraph {
     (index, output_node)
   }
 
+  pub fn add_vertex_output_only(&mut self) -> Index {
+    let output_node = self.add_node(VertexShaderOutputNode {});
+    self.vertex_output_node = Some(output_node);
+    output_node
+  }
+
   pub fn add_color_output(&mut self, name: &str, format: ShaderType) -> Index {
     let string = name.to_string();
     let index = self.add_node(ColorOutputNode {
@@ -47,26 +63,155 @@ impl ShaderGraph {
     index
   }
 
-  pub fn add_uniform<T: UniformStruct>(&mut self) -> (usize, Index) {
+  pub fn add_uniform<T: UniformStruct>(&mut self, name: &str) -> (Uuid, Index) {
     let node = UniformNode {
-      name: T::generate_name(),
+      name: name.to_string(),
       attributes: T::generate_attributes(),
     };
     let index = self.add_node(node);
+    let id = Uuid::new_v4();
     self.uniforms.push(Uniform {
+      id,
+      ty_id: T::get_id(),
       node_index: index,
       name: T::generate_name(),
       attributes: T::generate_attributes(),
     });
-    (self.uniforms.len() - 1, index)
+    (id, index)
+  }
+
+  pub fn add_sampled_texture(&mut self, name: &str) -> (Index, Uuid) {
+    let id = Uuid::new_v4();
+    let node = TextureNode {
+      name: name.to_string(),
+    };
+    let node_index = self.add_node(node);
+    self.textures.push(Texture {
+      id,
+      node_index,
+      name: name.to_string(),
+    });
+    (node_index, id)
   }
 
   /// Add a new node into the graph.
   pub fn add_node<T: ShaderNode>(&mut self, node: T) -> Index {
     self.nodes.insert(Node {
-      node: Box::new(node),
+      node: Arc::new(node),
       inputs: [None; MAX_INPUT_OUTPUTS_PER_NODE],
     })
+  }
+
+  /// Adds another graph into thre current graph.
+  pub fn add_sub_graph(
+    &mut self,
+    graph: &ShaderGraph,
+    input_node: Option<Index>,
+    output_node: Option<Index>,
+  ) -> (Option<Index>, Option<Index>) {
+    // Mapping for indices
+    let mut mapped = HashMap::new();
+
+    // Add the vertex output first as there is always only once in the graph!
+    if let (Some(output), Some(output_current)) =
+      (graph.vertex_output_node, self.vertex_output_node)
+    {
+      // Insert for mapping purpose.
+      mapped.insert(output, output_current);
+      // Override set inputs from sub graph.
+      let old_node = graph.nodes.get(output).unwrap();
+      let new_node = self.nodes.get_mut(output_current).unwrap();
+      for (index, input) in old_node.inputs.iter().enumerate() {
+        if let Some(input) = input {
+          new_node.inputs[index] = Some(*input);
+        }
+      }
+    }
+
+    // Check uniform requirements
+    for uniform in &graph.uniforms {
+      let id = uniform.ty_id;
+      if let Some(existing) = self.uniforms.iter().find(|u| u.ty_id == id) {
+        // Uniform is already used in this graph therefore reuse that.
+        mapped.insert(uniform.node_index, existing.node_index);
+      } else {
+        // New uniform that needs to be inserted to current graph.
+        let old_node = graph.nodes.get(uniform.node_index).unwrap();
+        let uniform_node = self.nodes.insert(old_node.clone());
+        mapped.insert(uniform.node_index, uniform_node);
+        let new_uniform = Uniform {
+          node_index: uniform_node,
+          ..uniform.clone()
+        };
+        self.uniforms.push(new_uniform);
+      }
+    }
+
+    // Check textures
+    for texture in &graph.textures {
+      let name = &texture.name;
+      if let Some(existing) = self.textures.iter().find(|u| &u.name == name) {
+        // Texture is already used in this graph therefore reuse that.
+        mapped.insert(texture.node_index, existing.node_index);
+      } else {
+        // New texture that needs to be inserted to current graph.
+        let old_node = graph.nodes.get(texture.node_index).unwrap();
+        let texture_node = self.nodes.insert(old_node.clone());
+        mapped.insert(texture.node_index, texture_node);
+        let new_texture = Texture {
+          node_index: texture_node,
+          ..texture.clone()
+        };
+        self.textures.push(new_texture);
+      }
+    }
+
+    // Color outputs
+    for output in &graph.color_outputs {
+      if let Some(existing) = self.color_outputs.iter().find(|u| u.0 == output.0) {
+        // Output is already used in this graph therefore reuse that.
+        mapped.insert(output.2, existing.2);
+        // Override set inputs from sub graph.
+        let old_node = graph.nodes.get(output.2).unwrap();
+        let new_node = self.nodes.get_mut(existing.2).unwrap();
+        for (index, input) in old_node.inputs.iter().enumerate() {
+          if let Some(input) = input {
+            new_node.inputs[index] = Some(*input);
+          }
+        }
+      } else {
+        // New output that needs to be inserted to current graph.
+        let old_node = graph.nodes.get(output.2).unwrap();
+        let uniform_node = self.nodes.insert(old_node.clone());
+        mapped.insert(output.2, uniform_node);
+        self
+          .color_outputs
+          .push((output.0.clone(), output.1, uniform_node));
+      }
+    }
+
+    // Insert all nodes
+    for (old_index, node) in graph.nodes.iter() {
+      if mapped.contains_key(&old_index) {
+        continue;
+      }
+      let new_index = self.nodes.insert(node.clone());
+      mapped.insert(old_index, new_index);
+    }
+
+    // Map references.
+    for new in mapped.values() {
+      let node = self.nodes.get_mut(*new).unwrap();
+      for input in node.inputs.iter_mut().flatten() {
+        input.owner_node_index = *mapped.get(&input.owner_node_index).unwrap();
+      }
+    }
+
+    // Map inputs and outputs.
+    (
+      input_node.map(|index| *mapped.get(&index).unwrap()),
+      output_node.map(|index| *mapped.get(&index).unwrap()),
+    )
   }
 
   /// Connects one nodes output to another nodes input.
@@ -104,7 +249,13 @@ impl ShaderGraph {
     Ok(())
   }
 
-  pub fn build(&self, outputs: &[Index]) -> BuiltShaderGraph {
+  pub fn build(&mut self, outputs: &[Index]) -> BuiltShaderGraph {
+    // Do some post processing on graph.
+    for i in outputs {
+      self.cleanup_passthrough(*i);
+    }
+    self.cleanup_passthrough(self.vertex_output_node.unwrap());
+
     let mut vertex_shader_code = String::with_capacity(1024 * 1024);
     let mut fragment_shader_code = String::with_capacity(1024 * 1024);
 
@@ -152,6 +303,10 @@ impl ShaderGraph {
         if self.uniforms.iter().any(|u| u.node_index == *node_index) {
           continue;
         }
+        // Same for textures
+        if self.textures.iter().any(|t| t.node_index == *node_index) {
+          continue;
+        }
 
         let node = self.nodes.get(*node_index).unwrap();
         let outputs = node.node.get_outputs();
@@ -171,12 +326,29 @@ impl ShaderGraph {
       .iter()
       .enumerate()
       .map(|(index, uniform)| BuiltUniform {
+        id: uniform.id,
+        ty_id: uniform.ty_id,
         binding: index,
         name: uniform.name.clone(),
         attributes: uniform.attributes.clone(),
         in_vs: traversed_vertex_shader.contains(&uniform.node_index),
         in_fs: traversed_fragment_shader.contains(&uniform.node_index)
           && !shared_nodes.contains(&uniform.node_index),
+      })
+      .collect::<Vec<_>>();
+
+    // Texture
+    let textures = self
+      .textures
+      .iter()
+      .enumerate()
+      .map(|(index, texture)| BuiltTexture {
+        name: texture.name.clone(),
+        id: texture.id,
+        binding: uniforms.len() + index,
+        in_vs: traversed_vertex_shader.contains(&texture.node_index),
+        in_fs: traversed_fragment_shader.contains(&texture.node_index)
+          && !shared_nodes.contains(&texture.node_index),
       })
       .collect::<Vec<_>>();
 
@@ -190,6 +362,7 @@ impl ShaderGraph {
 
     // Vertex shader.
     {
+      let mut global_code = String::with_capacity(1024);
       optick::event!("ShaderGraph::generate_vertex_shader");
       vertex_shader_code += "#version 450\n\n";
 
@@ -224,16 +397,25 @@ impl ShaderGraph {
       }
 
       // Code
-      vertex_shader_code += "void main() {\n";
-      self.generate_code(&mut vertex_shader_code, &traversed_vertex_shader, &[]);
+      let mut function_code = String::with_capacity(1024);
+      function_code += "void main() {\n";
+      self.generate_code(
+        &mut function_code,
+        &mut global_code,
+        &traversed_vertex_shader,
+        &[],
+      );
       for (_, name) in &shared_attributes {
-        vertex_shader_code += format!("vs_{} = {};\n", name, name).as_str();
+        function_code += format!("vs_{} = {};\n", name, name).as_str();
       }
-      vertex_shader_code += "}\n";
+      function_code += "}\n";
+      vertex_shader_code += global_code.as_str();
+      vertex_shader_code += function_code.as_str();
     }
 
     // Fragment shader
     {
+      let mut global_code = String::with_capacity(1024);
       optick::event!("ShaderGraph::generate_fragment_shader");
       fragment_shader_code += "#version 450\n\n";
 
@@ -271,26 +453,49 @@ impl ShaderGraph {
         }
         Self::generate_uniform(uniform, &mut fragment_shader_code);
       }
+      for texture in &textures {
+        if !texture.in_fs {
+          continue;
+        }
+        Self::generate_texture(texture, &mut fragment_shader_code);
+      }
 
       // Code
-      fragment_shader_code += "void main() {\n";
+      let mut function_code = String::with_capacity(1024);
+      function_code += "void main() {\n";
       for (ty, name) in &shared_attributes {
-        fragment_shader_code +=
-          format!("{} {} = vs_{};\n", ty.get_glsl_type(), name, name).as_str();
+        function_code += format!("{} {} = vs_{};\n", ty.get_glsl_type(), name, name).as_str();
       }
       let vs = traversed_vertex_shader
         .iter()
         .copied()
         .filter(|it| self.uniforms.iter().find(|u| &u.node_index == it).is_none())
         .collect::<Vec<_>>();
-      self.generate_code(&mut fragment_shader_code, &traversed_fragment_shader, &vs);
-      fragment_shader_code += "}\n";
+      self.generate_code(
+        &mut function_code,
+        &mut global_code,
+        &traversed_fragment_shader,
+        &vs,
+      );
+      function_code += "}\n";
+
+      fragment_shader_code += global_code.as_str();
+      fragment_shader_code += function_code.as_str();
+    }
+
+    // Bind groups
+    let mut bind_groups = Vec::new();
+    for uniform in uniforms {
+      bind_groups.push(BuiltShaderBindGroup::Uniform(uniform));
+    }
+    for texture in textures {
+      bind_groups.push(BuiltShaderBindGroup::SampledTexture(texture));
     }
 
     BuiltShaderGraph {
       vs: vertex_shader_code,
       fs: fragment_shader_code,
-      required_uniforms: uniforms,
+      bind_groups,
     }
   }
 
@@ -308,7 +513,26 @@ impl ShaderGraph {
     *output += format!("}} {};\n", uniform.name).as_str();
   }
 
-  fn generate_code(&self, output: &mut String, nodes: &[Index], skipped: &[Index]) {
+  fn generate_texture(texture: &BuiltTexture, output: &mut String) {
+    *output += format!(
+      "layout (set = {}, binding = 0) uniform texture2D t_{};\n",
+      texture.binding, texture.name
+    )
+    .as_str();
+    *output += format!(
+      "layout (set = {}, binding = 1) uniform sampler s_{};\n",
+      texture.binding, texture.name
+    )
+    .as_str();
+  }
+
+  fn generate_code(
+    &self,
+    output: &mut String,
+    global: &mut String,
+    nodes: &[Index],
+    skipped: &[Index],
+  ) {
     for node_index in nodes.iter().rev() {
       if skipped.contains(node_index) {
         continue;
@@ -335,6 +559,7 @@ impl ShaderGraph {
         .map(|i| Some(format!("var_{}_{}", node_index.into_raw_parts().0, i)))
         .collect::<Vec<_>>();
 
+      node.node.generate_global_code(&inputs, &outputs, global);
       node.node.generate(&inputs, &outputs, output);
     }
   }
@@ -380,25 +605,64 @@ impl ShaderGraph {
       }
     }
   }
+
+  fn cleanup_passthrough(&mut self, index: Index) {
+    // List of changes required for the current node.
+    let mut changes = Vec::new();
+
+    // Go through inputs to find required changes.
+    let node = self.nodes.get(index).unwrap().clone();
+    for (index, input) in node.inputs.iter().enumerate() {
+      if let Some(input) = input {
+        // Is target node a passthrough
+        let target_node = self.nodes.get(input.owner_node_index).unwrap();
+        if target_node.node.is_passthrough() {
+          changes.push((
+            index,
+            target_node.inputs[input.owner_node_output].clone().unwrap(),
+          ));
+        }
+
+        self.cleanup_passthrough(input.owner_node_index);
+      }
+    }
+
+    // Apply changes mutably
+    let node = self.nodes.get_mut(index).unwrap();
+    for (index, new_input) in changes {
+      node.inputs[index] = Some(new_input);
+    }
+  }
 }
 
+#[derive(Clone)]
 struct Node {
   inputs: [Option<Input>; MAX_INPUT_OUTPUTS_PER_NODE],
-  node: Box<dyn ShaderNode>,
+  node: Arc<dyn ShaderNode>,
 }
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 struct Input {
   owner_node_index: Index,
   owner_node_output: usize,
 }
 
+#[derive(Clone)]
 struct Uniform {
+  id: Uuid,
+  ty_id: Uuid,
   node_index: Index,
   name: String,
   attributes: Vec<(String, ShaderType)>,
 }
 
-pub trait ShaderNode: 'static {
+#[derive(Clone)]
+struct Texture {
+  id: Uuid,
+  name: String,
+  node_index: Index,
+}
+
+pub trait ShaderNode: Send + Sync + 'static {
   fn get_available_stages(&self) -> (bool, bool) {
     (true, true)
   }
@@ -411,7 +675,19 @@ pub trait ShaderNode: 'static {
     Vec::new()
   }
 
+  fn is_passthrough(&self) -> bool {
+    false
+  }
+
   fn generate(&self, inputs: &[Option<String>], outputs: &[Option<String>], output: &mut String);
+
+  fn generate_global_code(
+    &self,
+    _inputs: &[Option<String>],
+    _outputs: &[Option<String>],
+    _output: &mut String,
+  ) {
+  }
 }
 
 #[derive(Clone)]
@@ -492,7 +768,7 @@ impl ShaderNode for UniformNode {
   fn generate(&self, _inputs: &[Option<String>], outputs: &[Option<String>], output: &mut String) {
     for (index, (name, ty)) in self.attributes.iter().enumerate() {
       *output += format!(
-        "{} {} = {}.{};\n",
+        "{} {} = {}_uniform.{};\n",
         ty.get_glsl_type(),
         outputs[index].as_ref().unwrap(),
         self.name,
@@ -503,11 +779,112 @@ impl ShaderNode for UniformNode {
   }
 }
 
+struct TextureNode {
+  name: String,
+}
+impl ShaderNode for TextureNode {
+  fn get_outputs(&self) -> Vec<ShaderType> {
+    vec![ShaderType::Float]
+  }
+
+  fn generate(
+    &self,
+    _inputs: &[Option<String>],
+    _outputs: &[Option<String>],
+    _output: &mut String,
+  ) {
+  }
+
+  fn generate_global_code(
+    &self,
+    _inputs: &[Option<String>],
+    outputs: &[Option<String>],
+    output: &mut String,
+  ) {
+    *output += format!(
+      r#"
+      vec4 sample_fn_{}(vec2 uv) {{
+        return texture(sampler2D(t_{}, s_{}), uv);
+      }}
+      "#,
+      outputs[0].as_ref().unwrap(),
+      &self.name,
+      &self.name,
+    )
+    .as_str();
+  }
+}
+
+pub struct TextureSampleNode;
+
+impl TextureSampleNode {
+  pub const INPUT_TEXTURE: usize = 0;
+  pub const INPUT_UV: usize = 1;
+  pub const OUTPUT_COLOR: usize = 0;
+
+  pub fn new() -> Self {
+    Self
+  }
+}
+
+impl ShaderNode for TextureSampleNode {
+  fn generate(&self, inputs: &[Option<String>], outputs: &[Option<String>], output: &mut String) {
+    *output += format!(
+      "vec4 {} = sample_fn_{}({});\n",
+      outputs[Self::OUTPUT_COLOR].as_ref().unwrap(),
+      inputs[Self::INPUT_TEXTURE].as_ref().unwrap(),
+      inputs[Self::INPUT_UV].as_ref().unwrap()
+    )
+    .as_str();
+  }
+}
+
+pub struct InputPassthroughNode {
+  inputs: Vec<(ShaderType, String)>,
+}
+
+impl InputPassthroughNode {
+  pub fn new() -> Self {
+    Self { inputs: Vec::new() }
+  }
+
+  pub fn add_input(mut self, ty: ShaderType, default: &str) -> Self {
+    self.inputs.push((ty, default.to_string()));
+    self
+  }
+}
+
+impl ShaderNode for InputPassthroughNode {
+  fn is_passthrough(&self) -> bool {
+    true
+  }
+
+  fn generate(
+    &self,
+    _inputs: &[Option<String>],
+    _outputs: &[Option<String>],
+    _output: &mut String,
+  ) {
+    panic!("Passthrough node must be elimated in graph pre-processor");
+  }
+}
+
 #[derive(Debug)]
 pub struct BuiltUniform {
   pub binding: usize,
+  pub ty_id: Uuid,
+  pub id: Uuid,
   name: String,
   attributes: Vec<(String, ShaderType)>,
+  pub in_vs: bool,
+  pub in_fs: bool,
+}
+
+#[derive(Debug)]
+pub struct BuiltTexture {
+  pub name: String,
+  pub binding: usize,
+  pub id: Uuid,
   pub in_vs: bool,
   pub in_fs: bool,
 }
@@ -516,7 +893,13 @@ pub struct BuiltUniform {
 pub struct BuiltShaderGraph {
   pub vs: String,
   pub fs: String,
-  pub required_uniforms: Vec<BuiltUniform>,
+  pub bind_groups: Vec<BuiltShaderBindGroup>,
+}
+
+#[derive(Debug)]
+pub enum BuiltShaderBindGroup {
+  SampledTexture(BuiltTexture),
+  Uniform(BuiltUniform),
 }
 
 #[derive(Error, Debug)]

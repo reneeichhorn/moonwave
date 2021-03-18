@@ -1,20 +1,77 @@
 use crate::Core;
 use moonwave_common::Vector2;
 use moonwave_render::{CommandEncoder, CommandEncoderOutput, FrameGraphNode, FrameNodeValue};
-use moonwave_resources::{ResourceRc, Texture, TextureFormat, TextureUsage, TextureView};
+use moonwave_resources::*;
+use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
+use shaderc::ShaderKind;
 use std::sync::Arc;
+
+static PRESENT_TO_SCREEN_PROGRAM: OnceCell<PresentToScreenResources> = OnceCell::new();
 
 pub struct PresentToScreen {}
 
+struct PresentToScreenResources {
+  _vs: ResourceRc<Shader>,
+  _fs: ResourceRc<Shader>,
+  _pipeline_layout: ResourceRc<PipelineLayout>,
+  pipeline: ResourceRc<RenderPipeline>,
+}
+
 impl PresentToScreen {
   pub const INPUT_TEXTURE: usize = 0;
+
+  pub fn new() -> Self {
+    let _ = PRESENT_TO_SCREEN_PROGRAM.get_or_init(|| {
+      let core = Core::get_instance();
+      let vs = core
+        .create_shader_from_glsl(
+          include_str!("./passthrough.vert"),
+          "PassthroughVS",
+          ShaderKind::Vertex,
+        )
+        .unwrap();
+
+      let fs = core
+        .create_shader_from_glsl(
+          include_str!("./passthrough.frag"),
+          "PassthroughFS",
+          ShaderKind::Fragment,
+        )
+        .unwrap();
+
+      let layout_desc = PipelineLayoutDescriptor::new().add_binding(
+        core
+          .get_gp_resources()
+          .sampled_texture_bind_group_layout
+          .clone(),
+      );
+      let pipeline_layout = core.create_pipeline_layout(layout_desc);
+
+      let pipeline_desc = RenderPipelineDescriptor::new_without_vertices(
+        pipeline_layout.clone(),
+        vs.clone(),
+        fs.clone(),
+      )
+      .add_color_output(TextureFormat::Bgra8UnormSrgb);
+      let pipeline = core.create_render_pipeline(pipeline_desc);
+
+      PresentToScreenResources {
+        _vs: vs,
+        _fs: fs,
+        _pipeline_layout: pipeline_layout,
+        pipeline,
+      }
+    });
+
+    PresentToScreen {}
+  }
 }
 
 impl FrameGraphNode for PresentToScreen {
   fn execute_raw(
     &self,
-    _inputs: &[Option<FrameNodeValue>],
+    inputs: &[Option<FrameNodeValue>],
     _outputs: &mut [Option<FrameNodeValue>],
     device: &wgpu::Device,
     _queue: &wgpu::Queue,
@@ -25,7 +82,16 @@ impl FrameGraphNode for PresentToScreen {
     });
 
     {
-      let _rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+      let resources = PRESENT_TO_SCREEN_PROGRAM.get().unwrap();
+      let pipeline = resources.pipeline.get_raw();
+
+      let bind_group = if let Some(FrameNodeValue::SampledTexture(texture)) = &inputs[0] {
+        Some(texture.bind_group.get_raw())
+      } else {
+        None
+      };
+
+      let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("RenderPassPresentToScreen"),
         color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
           resolve_target: None,
@@ -37,6 +103,12 @@ impl FrameGraphNode for PresentToScreen {
         }],
         depth_stencil_attachment: None,
       });
+
+      if let Some(bind_group) = &bind_group {
+        rp.set_pipeline(&*pipeline);
+        rp.set_bind_group(0, &*bind_group, &[]);
+        rp.draw(0..4, 0..1);
+      }
     }
 
     CommandEncoderOutput::from_raw(encoder.finish())
@@ -60,26 +132,25 @@ impl TextureSize {
 pub struct TextureGeneratorHost {
   size: TextureSize,
   format: TextureFormat,
-  active: Mutex<(Vector2<u32>, ResourceRc<Texture>, ResourceRc<TextureView>)>,
+  active: Arc<Mutex<(Vector2<u32>, SampledTexture, bool)>>,
 }
 
 impl TextureGeneratorHost {
   pub fn new(size: TextureSize, format: TextureFormat) -> Arc<Self> {
     let core = Core::get_instance();
     let actual_size = size.get_actual_size();
-    let texture = core.create_texture(
+    let texture = core.create_sampled_texture(
       None,
       TextureUsage::RENDER_ATTACHMENT | TextureUsage::SAMPLED,
       format,
       actual_size,
       1,
     );
-    let view = core.create_texture_view(texture.clone());
 
     Arc::new(Self {
       format,
       size,
-      active: Mutex::new((actual_size, texture, view)),
+      active: Arc::new(Mutex::new((actual_size, texture, false))),
     })
   }
 
@@ -103,21 +174,32 @@ impl FrameGraphNode for TextureGeneratorNode {
   ) {
     // Recreate texture if resolution changed.
     let size = self.0.size.get_actual_size();
+
+    let active_cloned = self.0.active.clone();
     let mut active = self.0.active.lock();
-    if size != active.0 {
+    if size != active.0 && !active.2 {
       let core = Core::get_instance();
-      let texture = core.create_texture(
-        None,
-        TextureUsage::RENDER_ATTACHMENT | TextureUsage::SAMPLED,
-        self.0.format,
-        size,
-        1,
-      );
-      let view = core.create_texture_view(texture.clone());
-      *active = (size, texture, view);
+      active.2 = true;
+      let format = self.0.format;
+
+      core.spawn_background_task(move || {
+        /*
+        let texture = core.create_sampled_texture(
+          None,
+          TextureUsage::RENDER_ATTACHMENT | TextureUsage::SAMPLED,
+          format,
+          size,
+          1,
+        );
+        let mut active = active_cloned.lock();
+        active.0 = size;
+        active.1 = texture;
+        active.2 = false;
+        */
+      });
     }
 
     // Output
-    outputs[Self::OUTPUT_TEXTURE] = Some(FrameNodeValue::TextureView(active.2.clone()));
+    outputs[Self::OUTPUT_TEXTURE] = Some(FrameNodeValue::SampledTexture(active.1.clone()));
   }
 }

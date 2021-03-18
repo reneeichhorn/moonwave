@@ -10,5 +10,6 @@ proc-macro = true
 [dependencies]
 proc-macro2 = "1.0"
 syn = { version = "1.0", features = ["full"] }
+uuid = { version = "0.8", features = ["v4"] }
 quote = "1.0"
 heck = "0.3"

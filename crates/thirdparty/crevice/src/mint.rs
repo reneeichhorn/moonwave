@@ -34,6 +34,9 @@ macro_rules! mint_vectors {
 }
 
 mint_vectors! {
+    cgmath::Vector2<f32>, Vec2, (x, y),
+    cgmath::Vector3<f32>, Vec3, (x, y, z),
+    cgmath::Vector4<f32>, Vec4, (x, y, z, w),
     mint::Vector2<f32>, Vec2, (x, y),
     mint::Vector3<f32>, Vec3, (x, y, z),
     mint::Vector4<f32>, Vec4, (x, y, z, w),
@@ -49,6 +52,7 @@ macro_rules! mint_matrices {
                 type Std140Type = std140::$std_name;
 
                 fn as_std140(&self) -> Self::Std140Type {
+                    #[allow(clippy::needless_update)]
                     std140::$std_name {
                         $(
                             $field: self.$field.as_std140(),
@@ -62,6 +66,7 @@ macro_rules! mint_matrices {
                 type Std430Type = std430::$std_name;
 
                 fn as_std430(&self) -> Self::Std430Type {
+                    #[allow(clippy::needless_update)]
                     std430::$std_name {
                         $(
                             $field: self.$field.as_std430(),
@@ -78,6 +83,9 @@ mint_matrices! {
     mint::ColumnMatrix2<f32>, Mat2, (x, y),
     mint::ColumnMatrix3<f32>, Mat3, (x, y, z),
     mint::ColumnMatrix4<f32>, Mat4, (x, y, z, w),
+    cgmath::Matrix2<f32>, Mat2, (x, y),
+    cgmath::Matrix3<f32>, Mat3, (x, y, z),
+    cgmath::Matrix4<f32>, Mat4, (x, y, z, w),
 }
 
 impl AsStd140 for nalgebra::Matrix4<f32> {

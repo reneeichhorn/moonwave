@@ -672,7 +672,7 @@ fn generate_extension_tree(
   ext: &proc_macro2::Ident,
   items: &[TokenStream2],
 ) -> TokenStream2 {
-  let ext_into = format_ident!("{}Into", ext);
+  let ext_into = format_ident!("{}{}Into", ext, host);
 
   quote! {
         #[doc(hidden)]

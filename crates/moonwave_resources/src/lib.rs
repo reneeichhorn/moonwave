@@ -53,6 +53,7 @@ pub trait IntoResource {
 pub enum Resource {
   Texture(wgpu::Texture),
   TextureView(wgpu::TextureView),
+  Sampler(wgpu::Sampler),
   Buffer(wgpu::Buffer),
   Shader(wgpu::ShaderModule),
   BindGroupLayout(wgpu::BindGroupLayout),
@@ -110,6 +111,7 @@ macro_rules! make_into_resource {
   };
 }
 make_into_resource!(Buffer, Buffer);
+make_into_resource!(Sampler, Sampler);
 make_into_resource!(Texture, Texture);
 make_into_resource!(TextureView, TextureView);
 make_into_resource!(Shader, ShaderModule);
@@ -209,6 +211,8 @@ pub struct BindGroupLayoutEntry {
 
 pub enum BindGroupLayoutEntryType {
   UniformBuffer,
+  Sampler,
+  SingleTexture,
 }
 
 impl BindGroupLayoutDescriptor {
@@ -257,28 +261,48 @@ impl BindGroupDescriptor {
     self.entries.push((binding, BindGroupEntry::Buffer(buffer)));
     self
   }
+
+  pub fn add_texture_binding(mut self, binding: u32, texture: ResourceRc<TextureView>) -> Self {
+    self
+      .entries
+      .push((binding, BindGroupEntry::Texture(texture)));
+    self
+  }
+
+  pub fn add_sampler_binding(mut self, binding: u32, sampler: ResourceRc<Sampler>) -> Self {
+    self
+      .entries
+      .push((binding, BindGroupEntry::Sampler(sampler)));
+    self
+  }
 }
 
 pub enum BindGroupEntry {
   Buffer(ResourceRc<Buffer>),
+  Texture(ResourceRc<TextureView>),
+  Sampler(ResourceRc<Sampler>),
 }
 
 impl BindGroupEntry {
   pub fn read(&self) -> UnlockedBindGroupEntry {
     match self {
       BindGroupEntry::Buffer(buffer) => UnlockedBindGroupEntry::Buffer(buffer.get_raw()),
+      BindGroupEntry::Texture(texture) => UnlockedBindGroupEntry::Texture(texture.get_raw()),
+      BindGroupEntry::Sampler(sampler) => UnlockedBindGroupEntry::Sampler(sampler.get_raw()),
     }
   }
 }
 
 pub enum UnlockedBindGroupEntry<'a> {
   Buffer(MappedRwLockReadGuard<'a, wgpu::Buffer>),
+  Texture(MappedRwLockReadGuard<'a, wgpu::TextureView>),
+  Sampler(MappedRwLockReadGuard<'a, wgpu::Sampler>),
 }
 
 pub struct RenderPipelineDescriptor {
   pub layout: ResourceRc<PipelineLayout>,
   pub vertex_shader: ResourceRc<Shader>,
-  pub vertex_desc: VertexBuffer,
+  pub vertex_desc: Option<VertexBuffer>,
   pub fragment_shader: ResourceRc<Shader>,
   pub outputs: Vec<RenderPipelineOutput>,
   pub depth: Option<TextureFormat>,
@@ -297,7 +321,22 @@ impl RenderPipelineDescriptor {
   ) -> Self {
     Self {
       layout,
-      vertex_desc,
+      vertex_desc: Some(vertex_desc),
+      vertex_shader,
+      fragment_shader,
+      depth: None,
+      outputs: Vec::new(),
+    }
+  }
+
+  pub fn new_without_vertices(
+    layout: ResourceRc<PipelineLayout>,
+    vertex_shader: ResourceRc<Shader>,
+    fragment_shader: ResourceRc<Shader>,
+  ) -> Self {
+    Self {
+      layout,
+      vertex_desc: None,
       vertex_shader,
       fragment_shader,
       depth: None,
@@ -314,4 +353,12 @@ impl RenderPipelineDescriptor {
     self.depth = Some(format);
     self
   }
+}
+
+#[derive(Clone)]
+pub struct SampledTexture {
+  pub texture: ResourceRc<Texture>,
+  pub view: ResourceRc<TextureView>,
+  pub sampler: ResourceRc<Sampler>,
+  pub bind_group: ResourceRc<BindGroup>,
 }

@@ -1,15 +1,14 @@
-use moonwave_core::{BindGroupLayoutSingleton, Core, OnceInFrame};
-use moonwave_render::{CommandEncoder, FrameGraphNode, FrameNodeValue, Index};
+use moonwave_core::Core;
+use moonwave_render::{CommandEncoder, FrameGraphNode, FrameNodeValue};
 use moonwave_resources::{BindGroup, BindGroupDescriptor, Buffer, BufferUsage, ResourceRc};
 use moonwave_shader::UniformStruct;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::{
-  process::Command,
-  sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-  },
+use std::sync::{
+  atomic::{AtomicBool, Ordering},
+  Arc,
 };
+
+use crate::MATERIAL_UNIFORM_LAYOUT;
 
 #[derive(Clone)]
 pub struct Uniform<T: UniformStruct> {
@@ -19,7 +18,7 @@ pub struct Uniform<T: UniformStruct> {
   resources: Arc<PubUniformResources>,
 }
 
-impl<T: UniformStruct + BindGroupLayoutSingleton + Send + Sync + 'static> Uniform<T> {
+impl<T: UniformStruct + Send + Sync + 'static> Uniform<T> {
   pub fn new(initial: T) -> Self {
     let size = initial.generate_raw_u8().len() as u64;
 
@@ -38,9 +37,9 @@ impl<T: UniformStruct + BindGroupLayoutSingleton + Send + Sync + 'static> Unifor
       None,
     );
 
-    let bind_group_layout = T::get_bind_group_lazy();
     let bind_group = core.create_bind_group(
-      BindGroupDescriptor::new(bind_group_layout).add_buffer_binding(0, buffer.clone()),
+      BindGroupDescriptor::new(MATERIAL_UNIFORM_LAYOUT.clone())
+        .add_buffer_binding(0, buffer.clone()),
     );
 
     Self {
@@ -52,6 +51,7 @@ impl<T: UniformStruct + BindGroupLayoutSingleton + Send + Sync + 'static> Unifor
   }
 
   pub fn get_mut(&self) -> RwLockWriteGuard<T> {
+    self.is_dirty.store(true, Ordering::Relaxed);
     self.content.write()
   }
 

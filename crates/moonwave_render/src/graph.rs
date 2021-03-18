@@ -1,6 +1,6 @@
 use crate::{CommandEncoder, CommandEncoderOutput};
 use generational_arena::Arena;
-use moonwave_resources::{BindGroup, Buffer, ResourceRc, TextureView};
+use moonwave_resources::{BindGroup, Buffer, ResourceRc, SampledTexture, TextureView};
 use multimap::MultiMap;
 use parking_lot::{RwLock, RwLockReadGuard};
 use rayon::{prelude::*, ThreadPool};
@@ -219,6 +219,7 @@ impl FrameGraph {
   ) {
     {
       {
+        optick::event!("FrameGraph::traverse");
         // Gain read access to nodes and connections.
         let nodes = self.node_arena.read();
         let edges = self.edges_arena.read();
@@ -359,6 +360,7 @@ impl FrameGraph {
     }
 
     // Reset
+    optick::event!("FrameGraph::reset");
     self.reset();
   }
 }
@@ -368,6 +370,7 @@ pub enum FrameNodeValue {
   Buffer(ResourceRc<Buffer>),
   BindGroup(ResourceRc<BindGroup>),
   TextureView(ResourceRc<TextureView>),
+  SampledTexture(SampledTexture),
 }
 
 impl std::fmt::Debug for FrameNodeValue {
@@ -376,6 +379,7 @@ impl std::fmt::Debug for FrameNodeValue {
       Self::Buffer(_) => f.write_str("Buffer"),
       Self::BindGroup(_) => f.write_str("BindGroup"),
       Self::TextureView(_) => f.write_str("Texture"),
+      Self::SampledTexture(_) => f.write_str("SampledTexture"),
     }
   }
 }
@@ -406,9 +410,9 @@ pub trait DeviceHost: Send + Sync + 'static {
 }
 
 macro_rules! impl_get_node_specific {
-  ($getter:ident, $ty:ident) => {
+  ($getter:ident, $ty:ident, $rty:ty) => {
     impl FrameNodeValue {
-      pub fn $getter(&self) -> &ResourceRc<$ty> {
+      pub fn $getter(&self) -> &$rty {
         match self {
           FrameNodeValue::$ty(group) => group,
           _ => panic!(
@@ -422,5 +426,6 @@ macro_rules! impl_get_node_specific {
   };
 }
 
-impl_get_node_specific!(get_bind_group, BindGroup);
-impl_get_node_specific!(get_texture_view, TextureView);
+impl_get_node_specific!(get_bind_group, BindGroup, ResourceRc<BindGroup>);
+impl_get_node_specific!(get_texture_view, TextureView, ResourceRc<TextureView>);
+impl_get_node_specific!(get_sampled_texture, SampledTexture, SampledTexture);

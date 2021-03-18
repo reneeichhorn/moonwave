@@ -14,6 +14,7 @@ mod graph;
 
 pub use base::*;
 pub use graph::*;
+pub use uuid::Uuid;
 
 #[cfg(test)]
 mod test;
@@ -71,6 +72,7 @@ pub trait VertexStruct: Sized {
 
 /// Describes a sized sturct that can be used as a uniform.
 pub trait UniformStruct: Sized {
+  fn get_id() -> Uuid;
   fn generate_raw_u8(&self) -> Vec<u8>;
   fn generate_name() -> String;
   fn generate_attributes() -> Vec<(String, ShaderType)>;

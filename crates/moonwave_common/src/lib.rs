@@ -1,4 +1,5 @@
-pub use nalgebra::*;
+pub use cgmath::prelude::*;
+pub use cgmath::*;
 
 mod color;
 pub use color::*;

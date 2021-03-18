@@ -1,20 +1,20 @@
 use moonwave_common::Vector2;
 use moonwave_render::{DeviceHost, FrameGraph};
 use std::{
-  iter::Once,
   sync::{
     atomic::{AtomicU64, Ordering},
     Arc, RwLock,
   },
   time::Instant,
 };
+use wgpu_mipmap::{MipmapGenerator, RecommendedMipmapGenerator};
 
 use shaderc::Compiler;
 pub use shaderc::ShaderKind;
 use thiserror::Error;
 use wgpu::{
-  util::DeviceExt, BufferDescriptor, Device, Queue, Surface, SwapChain, SwapChainDescriptor,
-  SwapChainError,
+  util::DeviceExt, BufferDescriptor, CommandBuffer, Device, Queue, Surface, SwapChain,
+  SwapChainDescriptor, SwapChainError, TextureViewDimension,
 };
 
 use crate::{
@@ -25,6 +25,11 @@ use moonwave_resources::*;
 
 static mut CORE: Option<Core> = None;
 
+pub struct GPResources {
+  // A bind group used for simple single texture binding.
+  pub sampled_texture_bind_group_layout: ResourceRc<BindGroupLayout>,
+}
+
 pub struct Core {
   device: Device,
   queue: Queue,
@@ -33,11 +38,14 @@ pub struct Core {
   surface: Surface,
   resources: ResourceStorage,
   extension_host: RwLock<ExtensionHost>,
-  graph: FrameGraph,
+  mip_generator: RecommendedMipmapGenerator,
+  elapsed_time: u64,
+  graph: Option<FrameGraph>,
   world: World,
   last_frame: Instant,
   service_locator: ServiceLocator,
   execution: Execution,
+  gp_resources: Option<GPResources>,
 }
 
 impl Core {
@@ -49,13 +57,16 @@ impl Core {
     surface: Surface,
   ) -> Self {
     Self {
+      mip_generator: RecommendedMipmapGenerator::new(&device),
       last_frame: Instant::now(),
+      elapsed_time: 0,
       swap_chain,
       sc_desc,
       device,
       queue,
       surface,
-      graph: FrameGraph::new(PresentToScreen {}),
+      graph: None,
+      gp_resources: None,
       resources: ResourceStorage::new(),
       extension_host: RwLock::new(ExtensionHost::new()),
       service_locator: ServiceLocator::new(),
@@ -71,8 +82,25 @@ impl Core {
     sc_desc: SwapChainDescriptor,
     surface: Surface,
   ) {
+    // Build static core and create new framegraph.
     unsafe {
       CORE = Some(Core::new(device, queue, swap_chain, sc_desc, surface));
+    }
+
+    let core = Self::get_instance();
+
+    // Build general purpose texture sampler.
+    let bind_group_layout_desc = BindGroupLayoutDescriptor::new()
+      .add_entry(0, BindGroupLayoutEntryType::SingleTexture)
+      .add_entry(1, BindGroupLayoutEntryType::Sampler);
+    let sampled_texture_bind_group_layout = core.create_bind_group_layout(bind_group_layout_desc);
+
+    // Store mutably
+    unsafe {
+      CORE.as_mut().unwrap().gp_resources = Some(GPResources {
+        sampled_texture_bind_group_layout,
+      });
+      CORE.as_mut().unwrap().graph = Some(FrameGraph::new(PresentToScreen::new()));
     }
   }
 
@@ -87,6 +115,16 @@ impl Core {
   pub(crate) fn get_instance_mut_unstable() -> &'static mut Core {
     // Only safe when frame graph, world and gpu resources are not in access anymore.
     unsafe { CORE.as_mut().unwrap() }
+  }
+
+  #[inline]
+  pub fn get_gp_resources(&self) -> &GPResources {
+    self.gp_resources.as_ref().unwrap()
+  }
+
+  #[inline]
+  pub fn get_elapsed_time(&self) -> u64 {
+    self.elapsed_time
   }
 
   pub(crate) fn recreate_swap_chain(&mut self, width: u32, height: u32) {
@@ -104,6 +142,7 @@ impl Core {
     let time = Instant::now();
     let duration = time - self.last_frame;
     self.last_frame = time;
+    self.elapsed_time = duration.as_micros() as u64;
 
     // Next frame.
     let swap_frame = Arc::new(self.swap_chain.get_current_frame()?);
@@ -120,16 +159,15 @@ impl Core {
     // Execute ecs
     {
       optick::event!("Core::frame::ecs_tick");
-      self.world.tick(
-        duration.as_micros() as u64,
-        self.execution.get_frame_thread_pool(),
-      );
+      self
+        .world
+        .tick(self.elapsed_time, self.execution.get_frame_thread_pool());
     }
 
     // Execute graph
     {
       optick::event!("Core::frame::execute_graph");
-      self.graph.execute(
+      self.graph.as_mut().unwrap().execute(
         swap_frame.clone(),
         Core::get_instance(),
         self.execution.get_frame_thread_pool(),
@@ -187,7 +225,7 @@ impl Core {
 
   #[inline]
   pub fn get_frame_graph(&self) -> &FrameGraph {
-    &self.graph
+    &self.graph.as_ref().unwrap()
   }
 
   #[inline]
@@ -268,6 +306,86 @@ impl Core {
     self.resources.create_proxy(raw)
   }
 
+  pub fn create_inited_sampled_texture(
+    &self,
+    label: Option<&str>,
+    usage: TextureUsage,
+    format: TextureFormat,
+    size: Vector2<u32>,
+    buffer: &[u8],
+    bytes_per_row: usize,
+  ) -> SampledTexture {
+    optick::event!("Core::create_inited_texture");
+
+    // Calculate mips
+    let highest_size = size.x.max(size.y);
+    let mips = (highest_size as f32).log2().floor() as u32;
+
+    // Create empty texture.
+    let desc = wgpu::TextureDescriptor {
+      label,
+      mip_level_count: mips + 1,
+      sample_count: 1,
+      dimension: wgpu::TextureDimension::D2,
+      size: wgpu::Extent3d {
+        width: size.x,
+        height: size.y,
+        depth: 1,
+      },
+      usage: wgpu::TextureUsage::COPY_DST | wgpu::TextureUsage::RENDER_ATTACHMENT | usage,
+      format,
+    };
+    let raw = self.device.create_texture(&desc);
+
+    // Fill texture
+    self.queue.write_texture(
+      wgpu::TextureCopyView {
+        texture: &raw,
+        mip_level: 0,
+        origin: wgpu::Origin3d::ZERO,
+      },
+      buffer,
+      wgpu::TextureDataLayout {
+        bytes_per_row: bytes_per_row as u32,
+        offset: 0,
+        rows_per_image: size.y,
+      },
+      wgpu::Extent3d {
+        width: size.x,
+        height: size.y,
+        depth: 1,
+      },
+    );
+
+    // Generate mips and submit write.
+    let mut encoder = self.device.create_command_encoder(&Default::default());
+    self
+      .mip_generator
+      .generate(&self.device, &mut encoder, &raw, &desc)
+      .unwrap();
+    self.queue.submit(std::iter::once(encoder.finish()));
+
+    // Create proxy
+    let texture = self.resources.create_proxy(raw);
+
+    // Create sampling
+    let gp_resources = self.get_gp_resources();
+    let view = self.create_texture_view(texture.clone());
+    let sampler = self.create_sampler();
+    let bind_group = self.create_bind_group(
+      BindGroupDescriptor::new(gp_resources.sampled_texture_bind_group_layout.clone())
+        .add_texture_binding(0, view.clone())
+        .add_sampler_binding(1, sampler.clone()),
+    );
+
+    SampledTexture {
+      view,
+      texture,
+      sampler,
+      bind_group,
+    }
+  }
+
   /// Creates a new texture view.
   pub fn create_texture_view(&self, texture: ResourceRc<Texture>) -> ResourceRc<TextureView> {
     // Create raw device buffer.
@@ -278,6 +396,43 @@ impl Core {
 
     // Create proxy
     self.resources.create_proxy(raw)
+  }
+
+  /// Creates a new texture sampler.
+  pub fn create_sampler(&self) -> ResourceRc<Sampler> {
+    let raw = self.device.create_sampler(&wgpu::SamplerDescriptor {
+      address_mode_u: wgpu::AddressMode::Repeat,
+      address_mode_v: wgpu::AddressMode::Repeat,
+      ..Default::default()
+    });
+    self.resources.create_proxy(raw)
+  }
+
+  pub fn create_sampled_texture(
+    &self,
+    label: Option<&str>,
+    usage: TextureUsage,
+    format: TextureFormat,
+    size: Vector2<u32>,
+    mips: u32,
+  ) -> SampledTexture {
+    let gp_resources = self.get_gp_resources();
+
+    let texture = self.create_texture(label, usage, format, size, mips);
+    let view = self.create_texture_view(texture.clone());
+    let sampler = self.create_sampler();
+    let bind_group = self.create_bind_group(
+      BindGroupDescriptor::new(gp_resources.sampled_texture_bind_group_layout.clone())
+        .add_texture_binding(0, view.clone())
+        .add_sampler_binding(1, sampler.clone()),
+    );
+
+    SampledTexture {
+      view,
+      texture,
+      sampler,
+      bind_group,
+    }
   }
 
   /// Creates a new bind group layout.
@@ -299,6 +454,15 @@ impl Core {
             ty: wgpu::BufferBindingType::Uniform,
             has_dynamic_offset: false,
             min_binding_size: None,
+          },
+          BindGroupLayoutEntryType::Sampler => wgpu::BindingType::Sampler {
+            comparison: false,
+            filtering: true,
+          },
+          BindGroupLayoutEntryType::SingleTexture => wgpu::BindingType::Texture {
+            multisampled: false,
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2,
           },
         },
       })
@@ -365,6 +529,10 @@ impl Core {
               offset: 0,
               size: None,
             },
+            UnlockedBindGroupEntry::Texture(texture) => {
+              wgpu::BindingResource::TextureView(&*texture)
+            }
+            UnlockedBindGroupEntry::Sampler(sampler) => wgpu::BindingResource::Sampler(&*sampler),
           },
         )
       });
@@ -393,6 +561,31 @@ impl Core {
       let vs = desc.vertex_shader.get_raw();
       let fs = desc.fragment_shader.get_raw();
 
+      let attributes = desc.vertex_desc.clone().map(|vertex_desc| {
+        vertex_desc
+          .attributes
+          .iter()
+          .map(|attr| wgpu::VertexAttribute {
+            shader_location: attr.location as u32,
+            offset: attr.offset,
+            format: attr.format.to_wgpu(),
+          })
+          .collect::<Vec<_>>()
+      });
+
+      let vs_buffer = desc
+        .vertex_desc
+        .map(|vertex_desc| wgpu::VertexBufferLayout {
+          array_stride: vertex_desc.stride,
+          step_mode: wgpu::InputStepMode::Vertex,
+          attributes: attributes.as_ref().unwrap(),
+        });
+
+      let mut buffers = Vec::with_capacity(1);
+      if let Some(vs) = vs_buffer {
+        buffers.push(vs);
+      }
+
       self
         .device
         .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -402,20 +595,7 @@ impl Core {
           vertex: wgpu::VertexState {
             module: &*vs,
             entry_point: "main",
-            buffers: &[wgpu::VertexBufferLayout {
-              array_stride: desc.vertex_desc.stride,
-              step_mode: wgpu::InputStepMode::Vertex,
-              attributes: &desc
-                .vertex_desc
-                .attributes
-                .iter()
-                .map(|attr| wgpu::VertexAttribute {
-                  shader_location: attr.location as u32,
-                  offset: attr.offset,
-                  format: attr.format.to_wgpu(),
-                })
-                .collect::<Vec<_>>(),
-            }],
+            buffers: &buffers,
           },
           primitive: wgpu::PrimitiveState::default(),
           depth_stencil: desc.depth.map(|depth| wgpu::DepthStencilState {
@@ -423,7 +603,7 @@ impl Core {
             stencil: wgpu::StencilState::default(),
             format: depth,
             clamp_depth: false,
-            depth_compare: wgpu::CompareFunction::GreaterEqual,
+            depth_compare: wgpu::CompareFunction::Less,
             depth_write_enabled: true,
           }),
           fragment: Some(wgpu::FragmentState {
@@ -459,7 +639,7 @@ impl Core {
     // Compile to spir-v
     let spirv = compiler
       .compile_into_spirv(source, kind, name, "main", None)
-      .map_err(|err| ShaderError::SpirVCompilationFailed(err.to_string()))?;
+      .map_err(|err| ShaderError::SpirVCompilationFailed(err.to_string(), source.to_string()))?;
 
     if spirv.get_num_warnings() > 0 {
       warn!(
@@ -487,8 +667,8 @@ impl Core {
 
 #[derive(Error, Debug)]
 pub enum ShaderError {
-  #[error("Failed to compile glsl shader to spir-v: {0}")]
-  SpirVCompilationFailed(String),
+  #[error("Failed to compile glsl shader to spir-v: {0}\n\nCode: {1}")]
+  SpirVCompilationFailed(String, String),
 }
 
 pub enum TaskKind {

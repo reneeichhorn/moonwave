@@ -222,7 +222,7 @@ impl<'a> Drop for RenderPassCommandEncoder<'a> {
           attachment: &*depth,
           depth_ops: Some(wgpu::Operations {
             store: true,
-            load: wgpu::LoadOp::Clear(0.0),
+            load: wgpu::LoadOp::Clear(1.0),
           }),
           stencil_ops: None,
         }

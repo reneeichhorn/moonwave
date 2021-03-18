@@ -1,5 +1,6 @@
 use crate::{base::Core, logger::init, ActorRc, Spawnable, TypedServiceIntoHost};
 use legion::{systems::CommandBuffer, Resources};
+use log::debug;
 use wgpu::SwapChainError;
 use winit::{
   dpi::PhysicalSize,
@@ -47,6 +48,13 @@ impl Application {
         )
         .await
         .unwrap();
+
+      // Logging
+      debug!(
+        "Device created:\n\tFeatures: {:?}\n\tLimits: {:?}",
+        device.features(),
+        device.limits()
+      );
 
       // Create swap chain
       let sc_format = adapter.get_swap_chain_preferred_format(&surface);

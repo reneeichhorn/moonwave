@@ -2,7 +2,7 @@ use std::unimplemented;
 
 use legion::world::SubWorld;
 use legion::IntoQuery;
-use moonwave_common::{Matrix4, Vector3};
+use moonwave_common::*;
 use moonwave_core::*;
 use moonwave_shader::uniform;
 
@@ -65,9 +65,11 @@ pub fn update_model_uniforms(world: &mut SubWorld) {
     }
 
     // Build matrix
-    let translation = Matrix4::new_translation(&model.position);
-    let rotation = Matrix4::new_rotation(model.rotation);
-    let scale = Matrix4::new_nonuniform_scaling(&model.scale);
+    let translation = Matrix4::from_translation(model.position);
+    let rotation = Matrix4::from_angle_x(Rad(model.rotation.x))
+      * Matrix4::from_angle_y(Rad(model.rotation.y))
+      * Matrix4::from_angle_z(Rad(model.rotation.z));
+    let scale = Matrix4::from_nonuniform_scale(model.scale.x, model.scale.y, model.scale.z);
     let matrix = translation * rotation * scale;
 
     // Update uniform

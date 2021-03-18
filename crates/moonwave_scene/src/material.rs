@@ -1,60 +1,139 @@
-use std::marker::PhantomData;
+use std::collections::HashMap;
+use std::sync::Arc;
 
-use moonwave_common::Vector4;
-use moonwave_core::{BindGroupLayoutSingleton, Core, ShaderKind};
+use lazy_static::lazy_static;
+use moonwave_core::{debug, Core, OnceCell, ShaderKind};
 use moonwave_resources::{
-  BindGroupLayout, PipelineLayout, PipelineLayoutDescriptor, ResourceRc, Shader,
+  BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntryType, PipelineLayout,
+  PipelineLayoutDescriptor, ResourceRc, Shader,
 };
 use moonwave_shader::{
-  Constant, Index, Multiply, ShaderGraph, ShaderType, Vector3Upgrade, VertexStruct,
+  BuiltShaderBindGroup, BuiltShaderGraph, Index, InputPassthroughNode, Multiply, ShaderGraph,
+  ShaderType, UniformStruct, Uuid, Vector3Upgrade,
 };
+use parking_lot::RwLock;
 
 use crate::{CameraUniform, ModelUniform};
 
-pub struct Material<T: VertexStruct> {
-  graph: ShaderGraph,
-  vertex_in: Index,
-  vertex_out: Index,
-  color_outs: Vec<Index>,
-  built: Option<BuiltMaterial>,
-  _m: PhantomData<T>,
+lazy_static! {
+  pub static ref MATERIAL_UNIFORM_LAYOUT: ResourceRc<BindGroupLayout> = {
+    let desc =
+      BindGroupLayoutDescriptor::new().add_entry(0, BindGroupLayoutEntryType::UniformBuffer);
+    Core::get_instance().create_bind_group_layout(desc)
+  };
+  pub static ref MATERIAL_TEXTURE_LAYOUT: ResourceRc<BindGroupLayout> = {
+    let desc = BindGroupLayoutDescriptor::new()
+      .add_entry(0, BindGroupLayoutEntryType::SingleTexture)
+      .add_entry(1, BindGroupLayoutEntryType::Sampler);
+    Core::get_instance().create_bind_group_layout(desc)
+  };
 }
 
-impl<T: VertexStruct + 'static> Material<T> {
-  pub fn new() -> Self {
-    let mut graph = ShaderGraph::new();
-    let (vertex_in, vertex_out) = graph.add_vertex_attributes::<T>();
-    let color_out = graph.add_color_output("Color", ShaderType::Float4);
+pub struct Material {
+  graph: RwLock<ShaderGraph>,
+  built: RwLock<Option<Arc<BuiltMaterial>>>,
+}
 
+impl Material {
+  pub fn new(graph: ShaderGraph) -> Self {
     Self {
-      vertex_in,
-      vertex_out,
-      graph,
-      color_outs: vec![color_out],
-      built: None,
-      _m: PhantomData {},
+      graph: RwLock::new(graph),
+      built: RwLock::new(None),
     }
   }
 
-  pub(crate) fn build(&mut self) -> BuiltMaterial {
-    let core = Core::get_instance();
-    if let Some(built) = &self.built {
+  pub(crate) fn build(&self) -> Arc<BuiltMaterial> {
+    let mut built_cache = self.built.write();
+    if let Some(built) = &*built_cache {
       return built.clone();
     }
 
-    // Build shaders from material.
-    let graph = &mut self.graph;
-    let (_camera_index, camera_in) = graph.add_uniform::<CameraUniform>();
-    let (_model_index, model_in) = graph.add_uniform::<ModelUniform>();
+    // Build shaders
+    let mut graph = self.graph.write();
+    let outputs = graph
+      .get_color_outputs()
+      .iter()
+      .map(|(_, _, index)| *index)
+      .collect::<Vec<_>>();
+    let built = graph.build(&outputs);
 
-    let color_constant = graph.add_node(Constant::new(Vector4::new(1.0, 0.0, 1.0, 1.0)));
+    debug!(
+      "Build vertex shader {}\n\nBuild fragment shader: {}",
+      built.vs, built.fs
+    );
+
+    // Compile
+    let core = Core::get_instance();
+    let vertex_shader = core
+      .create_shader_from_glsl(built.vs.as_str(), "material_vs", ShaderKind::Vertex)
+      .unwrap();
+    let fragment_shader = core
+      .create_shader_from_glsl(built.fs.as_str(), "material_fs", ShaderKind::Fragment)
+      .unwrap();
+
+    // Create layout
+    let mut desc = PipelineLayoutDescriptor::new();
+    for group in built.bind_groups.iter() {
+      let layout = match group {
+        BuiltShaderBindGroup::Uniform(_) => MATERIAL_UNIFORM_LAYOUT.clone(),
+        BuiltShaderBindGroup::SampledTexture(_) => MATERIAL_TEXTURE_LAYOUT.clone(),
+      };
+      desc = desc.add_binding(layout);
+    }
+    let layout = core.create_pipeline_layout(desc);
+
+    let built_material = Arc::new(BuiltMaterial {
+      shader: built,
+      vertex_shader,
+      fragment_shader,
+      layout,
+    });
+    *built_cache = Some(built_material.clone());
+    built_material
+  }
+}
+
+pub(crate) struct BuiltMaterial {
+  pub(crate) shader: BuiltShaderGraph,
+  pub(crate) vertex_shader: ResourceRc<Shader>,
+  pub(crate) fragment_shader: ResourceRc<Shader>,
+  pub(crate) layout: ResourceRc<PipelineLayout>,
+}
+
+pub struct PBRShaderNode {}
+
+impl PBRShaderNode {
+  pub const INPUT_POSITION: usize = 0;
+  pub const INPUT_ALBEDO: usize = 1;
+
+  pub fn new() -> PBRShaderNode {
+    Self {}
+  }
+
+  pub fn build_graph() -> (ShaderGraph, Index) {
+    // Basic shader graph that will be used as a sub graph only
+    let mut graph = ShaderGraph::new();
+    let vertex_out = graph.add_vertex_output_only();
+    let color_out = graph.add_color_output("color", ShaderType::Float4);
+
+    // Add passthrough node for pbr node inputs
+    let input_index = graph.add_node(
+      InputPassthroughNode::new()
+        .add_input(ShaderType::Float3, "vec3(0, 0, 0)")
+        .add_input(ShaderType::Float4, "vec4(0, 0, 0, 0)"),
+    );
+
+    // Build shaders from material.
+    let (_, camera_in) = graph.add_uniform::<CameraUniform>("camera");
+    let (_, model_in) = graph.add_uniform::<ModelUniform>("model");
+
     let matrix_multiply = graph.add_node(Multiply::new(ShaderType::Matrix4));
     let pos_multiply = graph.add_node(Multiply::new(ShaderType::Float4));
     let upgrade = graph.add_node(Vector3Upgrade {});
 
-    // Hard coded color output.
+    // Color to color ouput
     graph
-      .connect(color_constant, Constant::OUTPUT, self.color_outs[0], 0)
+      .connect(input_index, Self::INPUT_ALBEDO, color_out, 0)
       .unwrap();
 
     // Multiply matrices
@@ -77,8 +156,14 @@ impl<T: VertexStruct + 'static> Material<T> {
 
     // Make position
     graph
-      .connect(self.vertex_in, 0, upgrade, Vector3Upgrade::INPUT)
+      .connect(
+        input_index,
+        Self::INPUT_POSITION,
+        upgrade,
+        Vector3Upgrade::INPUT,
+      )
       .unwrap();
+
     graph
       .connect(
         matrix_multiply,
@@ -96,36 +181,9 @@ impl<T: VertexStruct + 'static> Material<T> {
       )
       .unwrap();
     graph
-      .connect(pos_multiply, Multiply::OUTPUT, self.vertex_out, 0)
+      .connect(pos_multiply, Multiply::OUTPUT, vertex_out, 0)
       .unwrap();
 
-    // Build shaders
-    let built = graph.build(&self.color_outs);
-    let vertex_shader = core
-      .create_shader_from_glsl(built.vs.as_str(), "material_vs", ShaderKind::Vertex)
-      .unwrap();
-    let fragment_shader = core
-      .create_shader_from_glsl(built.fs.as_str(), "material_fs", ShaderKind::Fragment)
-      .unwrap();
-
-    // Create layout
-    let desc = PipelineLayoutDescriptor::new()
-      .add_binding(CameraUniform::get_bind_group_lazy())
-      .add_binding(ModelUniform::get_bind_group_lazy());
-    let layout = core.create_pipeline_layout(desc);
-
-    self.built = Some(BuiltMaterial {
-      vertex_shader,
-      fragment_shader,
-      layout,
-    });
-    self.built.as_ref().unwrap().clone()
+    (graph, input_index)
   }
-}
-
-#[derive(Clone)]
-pub(crate) struct BuiltMaterial {
-  pub(crate) vertex_shader: ResourceRc<Shader>,
-  pub(crate) fragment_shader: ResourceRc<Shader>,
-  pub(crate) layout: ResourceRc<PipelineLayout>,
 }
