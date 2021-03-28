@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use heck::*;
 use proc_macro::*;
 use proc_macro2::{Span, TokenStream as TokenStream2};
@@ -7,10 +5,8 @@ use quote::{format_ident, quote};
 use syn::{
   parenthesized,
   parse::{Parse, ParseStream},
-  parse2, parse_quote,
-  punctuated::Punctuated,
-  token::Comma,
-  Block, FnArg, ImplItem, ImplItemMethod, ItemImpl, ItemTrait, LitInt, PatType, TraitItem, Type,
+  parse2, parse_quote, FnArg, ImplItem, ImplItemMethod, ItemImpl, ItemTrait, LitInt, TraitItem,
+  Type,
 };
 use syn::{parse_macro_input, ItemStruct, Result, Token};
 

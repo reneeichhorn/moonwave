@@ -22,6 +22,8 @@ members = [
   "crates/moonwave_resources",
   "crates/moonwave_render",
   "crates/moonwave_util",
+  "crates/moonwave_ui",
+  "crates/moonwave_ui/macros",
   "crates/thirdparty/crevice",
   "crates/thirdparty/crevice-derive",
 ]
