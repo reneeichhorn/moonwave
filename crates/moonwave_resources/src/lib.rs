@@ -1,23 +1,17 @@
 #![allow(clippy::new_without_default)]
 
-use parking_lot::{MappedRwLockReadGuard, RwLock, RwLockReadGuard};
 use std::marker::PhantomData;
 use std::sync::Arc;
-
-use slotmap::{DefaultKey, SlotMap};
 
 pub use wgpu::{IndexFormat, TextureFormat, TextureUsage};
 
 struct ResourceLife {
-  holder: Arc<RwLock<SlotMap<DefaultKey, Resource>>>,
-  key: DefaultKey,
+  original: Resource,
 }
 
 impl Drop for ResourceLife {
   fn drop(&mut self) {
     optick::event!("ResourceStorage::release_resource");
-    let mut holder = self.holder.write();
-    holder.remove(self.key);
   }
 }
 
@@ -34,16 +28,6 @@ impl<T> Clone for ResourceRc<T> {
     }
   }
 }
-
-impl<T> ResourceRc<T> {
-  pub fn replace_with<I: IntoResource<ProxyType = T>>(&self, new_value: I) {
-    let mut holder = self.life.holder.write();
-    let value = holder.get_mut(self.life.key).unwrap();
-    *value = new_value.into();
-  }
-}
-
-pub type UnlockedResource<'a, T> = MappedRwLockReadGuard<'a, T>;
 
 pub trait IntoResource {
   type ProxyType;
@@ -62,24 +46,17 @@ pub enum Resource {
   RenderPipeline(wgpu::RenderPipeline),
 }
 
-pub struct ResourceStorage {
-  resource_slots: Arc<RwLock<SlotMap<DefaultKey, Resource>>>,
-}
+pub struct ResourceStorage;
 
 impl ResourceStorage {
   pub fn new() -> Self {
-    Self {
-      resource_slots: Arc::new(RwLock::new(SlotMap::with_capacity(1024))),
-    }
+    Self {}
   }
 
   pub fn create_proxy<T: IntoResource>(&self, resource: T) -> ResourceRc<T::ProxyType> {
-    let mut resource_slots = self.resource_slots.write();
-    let key = resource_slots.insert(resource.into());
     ResourceRc {
       life: Arc::new(ResourceLife {
-        key,
-        holder: self.resource_slots.clone(),
+        original: resource.into(),
       }),
       _ty: PhantomData,
     }
@@ -98,14 +75,12 @@ macro_rules! make_into_resource {
     }
 
     impl ResourceRc<$proxy> {
-      pub fn get_raw(&self) -> MappedRwLockReadGuard<wgpu::$org> {
-        let key = self.life.key.clone();
-        RwLockReadGuard::map(self.life.holder.read(), |holder| {
-          match holder.get(key).unwrap() {
-            Resource::$proxy(res) => res,
-            _ => panic!("Unexpected resource type at slot"), // Won't happen due tor
-          }
-        })
+      pub fn get_raw(&self) -> &wgpu::$org {
+        if let Resource::$proxy(res) = &self.life.original {
+          &res
+        } else {
+          panic!("Unexpected resource type at slot") // won't happen due to phantom type safety.
+        }
       }
     }
   };
@@ -281,22 +256,6 @@ pub enum BindGroupEntry {
   Buffer(ResourceRc<Buffer>),
   Texture(ResourceRc<TextureView>),
   Sampler(ResourceRc<Sampler>),
-}
-
-impl BindGroupEntry {
-  pub fn read(&self) -> UnlockedBindGroupEntry {
-    match self {
-      BindGroupEntry::Buffer(buffer) => UnlockedBindGroupEntry::Buffer(buffer.get_raw()),
-      BindGroupEntry::Texture(texture) => UnlockedBindGroupEntry::Texture(texture.get_raw()),
-      BindGroupEntry::Sampler(sampler) => UnlockedBindGroupEntry::Sampler(sampler.get_raw()),
-    }
-  }
-}
-
-pub enum UnlockedBindGroupEntry<'a> {
-  Buffer(MappedRwLockReadGuard<'a, wgpu::Buffer>),
-  Texture(MappedRwLockReadGuard<'a, wgpu::TextureView>),
-  Sampler(MappedRwLockReadGuard<'a, wgpu::Sampler>),
 }
 
 pub struct RenderPipelineDescriptor {

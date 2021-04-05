@@ -10,6 +10,7 @@ moonwave_shader = { path = "./crates/moonwave_shader" }
 moonwave_render = { path = "./crates/moonwave_render" }
 moonwave_scene = { path = "./crates/moonwave_scene" }
 moonwave_resources = { path = "./crates/moonwave_resources" }
+moonwave_ui = { path = "./crates/moonwave_ui" }
 
 [workspace]
 members = [

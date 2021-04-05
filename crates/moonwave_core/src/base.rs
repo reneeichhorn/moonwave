@@ -70,7 +70,7 @@ impl Core {
       resources: ResourceStorage::new(),
       extension_host: RwLock::new(ExtensionHost::new()),
       service_locator: ServiceLocator::new(),
-      execution: Execution::new(6),
+      execution: Execution::new(1),
       world: World::new(),
     }
   }
@@ -148,13 +148,11 @@ impl Core {
     let swap_frame = Arc::new(self.swap_chain.get_current_frame()?);
 
     // Execute extensions
-    /*
     {
       optick::event!("Core::extensions::before_tick");
       let ext_host = self.extension_host.read().unwrap();
-      ext_host.before_tick(arced.clone());
+      ext_host.before_tick();
     }
-    */
 
     // Execute ecs
     {
@@ -512,27 +510,20 @@ impl Core {
     optick::event!("Core::create_bind_group");
 
     let raw = {
-      // Get locks on all related resources.
-      let entries = desc
-        .entries
-        .iter()
-        .map(|(binding, res)| (*binding, res.read()))
-        .collect::<Vec<_>>();
-
       // Create bind group entry
-      let wgpu_entries = entries.iter().map(|(binding, entry)| {
+      let wgpu_entries = desc.entries.iter().map(|(binding, entry)| {
         (
           *binding,
           match entry {
-            UnlockedBindGroupEntry::Buffer(buffer) => wgpu::BindingResource::Buffer {
-              buffer: &*buffer,
+            BindGroupEntry::Buffer(buffer) => wgpu::BindingResource::Buffer {
+              buffer: buffer.get_raw(),
               offset: 0,
               size: None,
             },
-            UnlockedBindGroupEntry::Texture(texture) => {
-              wgpu::BindingResource::TextureView(&*texture)
+            BindGroupEntry::Texture(texture) => {
+              wgpu::BindingResource::TextureView(texture.get_raw())
             }
-            UnlockedBindGroupEntry::Sampler(sampler) => wgpu::BindingResource::Sampler(&*sampler),
+            BindGroupEntry::Sampler(sampler) => wgpu::BindingResource::Sampler(sampler.get_raw()),
           },
         )
       });
@@ -597,7 +588,13 @@ impl Core {
             entry_point: "main",
             buffers: &buffers,
           },
-          primitive: wgpu::PrimitiveState::default(),
+          primitive: wgpu::PrimitiveState {
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: wgpu::CullMode::Back,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+          },
           depth_stencil: desc.depth.map(|depth| wgpu::DepthStencilState {
             bias: wgpu::DepthBiasState::default(),
             stencil: wgpu::StencilState::default(),
@@ -614,8 +611,16 @@ impl Core {
               .iter()
               .map(|output| wgpu::ColorTargetState {
                 format: output.format,
-                alpha_blend: wgpu::BlendState::default(),
-                color_blend: wgpu::BlendState::default(),
+                alpha_blend: wgpu::BlendState {
+                  src_factor: wgpu::BlendFactor::SrcAlpha,
+                  dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                  operation: wgpu::BlendOperation::Add,
+                },
+                color_blend: wgpu::BlendState {
+                  src_factor: wgpu::BlendFactor::SrcAlpha,
+                  dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                  operation: wgpu::BlendOperation::Add,
+                },
                 write_mask: wgpu::ColorWrite::all(),
               })
               .collect::<Vec<_>>(),

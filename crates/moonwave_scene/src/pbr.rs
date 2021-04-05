@@ -1,6 +1,6 @@
 use legion::world::SubWorld;
 use legion::IntoQuery;
-use moonwave_common::Vector3;
+use moonwave_common::{Vector3, Vector4};
 use moonwave_core::*;
 use moonwave_render::{
   CommandEncoder, FrameGraphNode, FrameNodeValue, RenderPassCommandEncoderBuilder,
@@ -41,7 +41,7 @@ impl StaticMeshRenderer {
   ) -> Self {
     REGISTERED_SYSTEM.call_once(|| {
       // Create texture nodes.
-      let color = TextureGeneratorHost::new(TextureSize::FullScreen, TextureFormat::Bgra8Unorm);
+      let color = TextureGeneratorHost::new(TextureSize::FullScreen, TextureFormat::Bgra8UnormSrgb);
       let depth = TextureGeneratorHost::new(TextureSize::FullScreen, TextureFormat::Depth32Float);
 
       PBR_MAIN_COLOR.set(color).ok().unwrap();
@@ -123,7 +123,7 @@ pub fn create_pbr_frame_graph(world: &mut SubWorld) {
               let pipeline = Core::get_instance().create_render_pipeline(
                 RenderPipelineDescriptor::new(layout, vb, vs, fs)
                   .add_depth(TextureFormat::Depth32Float)
-                  .add_color_output(TextureFormat::Bgra8Unorm),
+                  .add_color_output(TextureFormat::Bgra8UnormSrgb),
               );
               *cache.lock() = StaticMeshRendererCache::Created(pipeline);
             });
@@ -236,7 +236,7 @@ impl FrameGraphNode for PBRRenderGraphNode {
         .unwrap()
         .get_sampled_texture()
         .view,
-      Vector3::new(1.0, 1.0, 1.0),
+      Vector4::new(1.0, 1.0, 1.0, 1.0),
     );
     rpb.add_depth(
       &inputs[Self::INPUT_DEPTH]

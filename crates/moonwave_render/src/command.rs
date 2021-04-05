@@ -41,7 +41,7 @@ impl<'a> CommandEncoder<'a> {
     let fut = async {
       let raw_buffer = buffer.get_raw();
       {
-        let slice = raw_buffer.slice(0..);
+        let slice = raw_buffer.slice(0..data.len() as u64);
         slice.map_async(wgpu::MapMode::Write).await.unwrap();
         let mut writeable = slice.get_mapped_range_mut();
         writeable.clone_from_slice(data);
@@ -116,7 +116,7 @@ impl<'a> CommandEncoder<'a> {
 #[derive(Clone)]
 pub struct RenderPassCommandEncoderBuilder {
   name: String,
-  outputs: Vec<(ResourceRc<TextureView>, ColorRGB32)>,
+  outputs: Vec<(ResourceRc<TextureView>, ColorRGBA32)>,
   depth: Option<ResourceRc<TextureView>>,
 }
 
@@ -129,7 +129,7 @@ impl RenderPassCommandEncoderBuilder {
     }
   }
 
-  pub fn add_color_output(&mut self, view: &ResourceRc<TextureView>, clear: ColorRGB32) {
+  pub fn add_color_output(&mut self, view: &ResourceRc<TextureView>, clear: ColorRGBA32) {
     self.outputs.push((view.clone(), clear));
   }
 
@@ -138,12 +138,12 @@ impl RenderPassCommandEncoderBuilder {
   }
 }
 
-pub fn get_wgpu_color_rgb(color: ColorRGB32) -> wgpu::Color {
+pub fn get_wgpu_color_rgb(color: ColorRGBA32) -> wgpu::Color {
   wgpu::Color {
     r: color.x as f64,
     g: color.y as f64,
     b: color.z as f64,
-    a: 1.0,
+    a: color.w as f64,
   }
 }
 
@@ -152,34 +152,6 @@ enum RenderPassCommand {
   SetVertexBuffer(ResourceRc<Buffer>),
   SetIndexBuffer(IndexFormat, ResourceRc<Buffer>),
   SetBindGroup(u32, ResourceRc<BindGroup>),
-  RenderIndexed(Range<u32>),
-}
-
-impl RenderPassCommand {
-  fn lock(&self) -> RenderPassCommandUnlocked {
-    match self {
-      RenderPassCommand::SetRenderPipeline(a) => {
-        RenderPassCommandUnlocked::SetRenderPipeline(a.get_raw())
-      }
-      RenderPassCommand::SetVertexBuffer(a) => {
-        RenderPassCommandUnlocked::SetVertexBuffer(a.get_raw())
-      }
-      RenderPassCommand::SetIndexBuffer(a, b) => {
-        RenderPassCommandUnlocked::SetIndexBuffer(*a, b.get_raw())
-      }
-      RenderPassCommand::SetBindGroup(a, b) => {
-        RenderPassCommandUnlocked::SetBindGroup(*a, b.get_raw())
-      }
-      RenderPassCommand::RenderIndexed(a) => RenderPassCommandUnlocked::RenderIndexed(a.clone()),
-    }
-  }
-}
-
-enum RenderPassCommandUnlocked<'a> {
-  SetRenderPipeline(UnlockedResource<'a, wgpu::RenderPipeline>),
-  SetVertexBuffer(UnlockedResource<'a, wgpu::Buffer>),
-  SetIndexBuffer(IndexFormat, UnlockedResource<'a, wgpu::Buffer>),
-  SetBindGroup(u32, UnlockedResource<'a, wgpu::BindGroup>),
   RenderIndexed(Range<u32>),
 }
 
@@ -199,9 +171,6 @@ impl<'a> Drop for RenderPassCommandEncoder<'a> {
       .collect::<Vec<_>>();
 
     let depth = self.builder.depth.as_ref().map(|output| output.get_raw());
-
-    // Lock all resources required.
-    let commands = self.commands.iter().map(|c| c.lock()).collect::<Vec<_>>();
 
     // Create render pass.
     let mut rp = self.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -230,19 +199,19 @@ impl<'a> Drop for RenderPassCommandEncoder<'a> {
     });
 
     // Execute commands.
-    for command in commands.iter() {
+    for command in self.commands.iter() {
       match command {
-        RenderPassCommandUnlocked::SetRenderPipeline(pipeline) => rp.set_pipeline(&*pipeline),
-        RenderPassCommandUnlocked::SetBindGroup(binding, bind) => {
-          rp.set_bind_group(*binding, &*bind, &[])
+        RenderPassCommand::SetRenderPipeline(pipeline) => rp.set_pipeline(pipeline.get_raw()),
+        RenderPassCommand::SetBindGroup(binding, bind) => {
+          rp.set_bind_group(*binding, bind.get_raw(), &[])
         }
-        RenderPassCommandUnlocked::SetVertexBuffer(buffer) => {
-          rp.set_vertex_buffer(0, buffer.slice(0..))
+        RenderPassCommand::SetVertexBuffer(buffer) => {
+          rp.set_vertex_buffer(0, buffer.get_raw().slice(0..))
         }
-        RenderPassCommandUnlocked::SetIndexBuffer(format, buffer) => {
-          rp.set_index_buffer(buffer.slice(0..), *format)
+        RenderPassCommand::SetIndexBuffer(format, buffer) => {
+          rp.set_index_buffer(buffer.get_raw().slice(0..), *format)
         }
-        RenderPassCommandUnlocked::RenderIndexed(range) => rp.draw_indexed(range.clone(), 0, 0..1),
+        RenderPassCommand::RenderIndexed(range) => rp.draw_indexed(range.clone(), 0, 0..1),
         _ => {}
       }
     }

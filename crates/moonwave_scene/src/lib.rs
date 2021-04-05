@@ -23,3 +23,6 @@ pub use time::*;
 
 mod texture;
 pub use texture::*;
+
+mod staged_buffer;
+pub use staged_buffer::*;

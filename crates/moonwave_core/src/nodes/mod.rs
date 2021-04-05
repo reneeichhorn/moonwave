@@ -20,6 +20,7 @@ struct PresentToScreenResources {
 
 impl PresentToScreen {
   pub const INPUT_TEXTURE: usize = 0;
+  pub const INPUT_TEXTURE_UI: usize = 1;
 
   pub fn new() -> Self {
     let _ = PRESENT_TO_SCREEN_PROGRAM.get_or_init(|| {
@@ -85,29 +86,36 @@ impl FrameGraphNode for PresentToScreen {
       let resources = PRESENT_TO_SCREEN_PROGRAM.get().unwrap();
       let pipeline = resources.pipeline.get_raw();
 
-      let bind_group = if let Some(FrameNodeValue::SampledTexture(texture)) = &inputs[0] {
-        Some(texture.bind_group.get_raw())
-      } else {
-        None
-      };
+      let bind_groups = inputs
+        .iter()
+        .filter_map(|input| {
+          if let Some(FrameNodeValue::SampledTexture(texture)) = input {
+            Some(texture.bind_group.get_raw())
+          } else {
+            None
+          }
+        })
+        .collect::<Vec<_>>();
 
-      let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("RenderPassPresentToScreen"),
-        color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
-          resolve_target: None,
-          attachment: &sc_frame.output.view,
-          ops: wgpu::Operations {
-            load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-            store: true,
-          },
-        }],
-        depth_stencil_attachment: None,
-      });
+      {
+        let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+          label: Some("RenderPassPresentToScreen"),
+          color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
+            resolve_target: None,
+            attachment: &sc_frame.output.view,
+            ops: wgpu::Operations {
+              load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+              store: true,
+            },
+          }],
+          depth_stencil_attachment: None,
+        });
 
-      if let Some(bind_group) = &bind_group {
-        rp.set_pipeline(&*pipeline);
-        rp.set_bind_group(0, &*bind_group, &[]);
-        rp.draw(0..4, 0..1);
+        for bind_group in bind_groups.iter() {
+          rp.set_pipeline(&*pipeline);
+          rp.set_bind_group(0, &*bind_group, &[]);
+          rp.draw(0..4, 0..1);
+        }
       }
     }
 

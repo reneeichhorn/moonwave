@@ -1,4 +1,4 @@
-use crate::{base::Core, logger::init, ActorRc, Spawnable, TypedServiceIntoHost};
+use crate::{base::Core, logger::init, ActorRc, Extension, Spawnable, TypedServiceIntoHost};
 use legion::{systems::CommandBuffer, Resources};
 use log::debug;
 use wgpu::SwapChainError;
@@ -41,7 +41,7 @@ impl Application {
         .request_device(
           &wgpu::DeviceDescriptor {
             label: Some("Render Device"),
-            features: wgpu::Features::empty(),
+            features: wgpu::Features::NON_FILL_POLYGON_MODE,
             limits: wgpu::Limits::default(),
           },
           None, // Trace path
@@ -116,6 +116,11 @@ impl Application {
       &mut Resources::default(),
     );
     rc
+  }
+
+  /// Registers a core extension
+  pub fn add_extension<T: Extension>(&self, extension: T) {
+    Core::get_instance().add_extension(extension);
   }
 
   /// Starts execution of the application, will block current thread until application exits.

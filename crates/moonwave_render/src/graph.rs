@@ -204,7 +204,7 @@ impl FrameGraph {
     }
 
     // Store traversed node at level.
-    let traversed_index = levels_map.get_vec(&level).map(|x| x.len()).unwrap_or(0);
+    //let traversed_index = levels_map.get_vec(&level).map(|x| x.len()).unwrap_or(0);
     //cache.insert(node_index, traversed_index);
     // TODO: Due to retaining this index breaks currently :'(
     levels_map.insert(level, traversed_node);
@@ -285,7 +285,7 @@ impl FrameGraph {
             .par_iter()
             .zip(outputs_per_node)
             .enumerate()
-            .map(|(i, ((node, inputs), (oi, outputs)))| {
+            .map(|(_i, ((node, inputs), (_oi, outputs)))| {
               optick::event!("FrameGraph::node");
 
               // Prepare node execution

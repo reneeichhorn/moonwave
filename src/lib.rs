@@ -1,6 +1,11 @@
 pub use moonwave_common::{self, *};
 pub use moonwave_core::{self, *};
+
+#[doc(hidden)]
 pub use moonwave_scene;
+
+#[doc(hidden)]
+pub use moonwave_ui;
 
 #[doc(hidden)]
 pub use moonwave_resources;
@@ -18,4 +23,8 @@ pub mod render {
 
 pub mod scene {
   pub use moonwave_scene::*;
+}
+
+pub mod ui {
+  pub use moonwave_ui::*;
 }

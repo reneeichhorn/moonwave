@@ -1,8 +1,5 @@
-use crate::Core;
-use std::sync::Arc;
-
 pub trait Extension: Send + Sync + 'static {
-  fn before_tick(&self, core: Arc<Core>);
+  fn before_tick(&self);
 }
 
 pub(crate) struct ExtensionHost {
@@ -20,9 +17,9 @@ impl ExtensionHost {
     self.extensions.push(Box::new(extension));
   }
 
-  pub fn before_tick(&self, core: Arc<Core>) {
+  pub fn before_tick(&self) {
     for ext in &self.extensions {
-      ext.before_tick(core.clone());
+      ext.before_tick();
     }
   }
 }

@@ -50,6 +50,7 @@ pub fn create_static_texture(
             row_buffer[base] = pixel.0[0];
             row_buffer[base + 1] = pixel.0[1];
             row_buffer[base + 2] = pixel.0[2];
+            row_buffer[base + 3] = 255;
           }
         });
       (buffer, TextureFormat::Rgba8Unorm, actual_row_size)

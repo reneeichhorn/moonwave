@@ -42,7 +42,7 @@ impl Material {
     }
   }
 
-  pub(crate) fn build(&self) -> Arc<BuiltMaterial> {
+  pub fn build(&self) -> Arc<BuiltMaterial> {
     let mut built_cache = self.built.write();
     if let Some(built) = &*built_cache {
       return built.clone();
@@ -93,11 +93,11 @@ impl Material {
   }
 }
 
-pub(crate) struct BuiltMaterial {
-  pub(crate) shader: BuiltShaderGraph,
-  pub(crate) vertex_shader: ResourceRc<Shader>,
-  pub(crate) fragment_shader: ResourceRc<Shader>,
-  pub(crate) layout: ResourceRc<PipelineLayout>,
+pub struct BuiltMaterial {
+  pub shader: BuiltShaderGraph,
+  pub vertex_shader: ResourceRc<Shader>,
+  pub fragment_shader: ResourceRc<Shader>,
+  pub layout: ResourceRc<PipelineLayout>,
 }
 
 pub struct PBRShaderNode {}
