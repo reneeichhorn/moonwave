@@ -1,6 +1,7 @@
 use moonwave_common::Vector2;
 use moonwave_render::{DeviceHost, FrameGraph};
 use std::{
+  num::NonZeroU32,
   sync::{
     atomic::{AtomicU64, Ordering},
     Arc, RwLock,
@@ -70,7 +71,7 @@ impl Core {
       resources: ResourceStorage::new(),
       extension_host: RwLock::new(ExtensionHost::new()),
       service_locator: ServiceLocator::new(),
-      execution: Execution::new(1),
+      execution: Execution::new(6),
       world: World::new(),
     }
   }
@@ -294,7 +295,7 @@ impl Core {
       size: wgpu::Extent3d {
         width: size.x,
         height: size.y,
-        depth: 1,
+        depth_or_array_layers: 1,
       },
       usage,
       format,
@@ -328,7 +329,7 @@ impl Core {
       size: wgpu::Extent3d {
         width: size.x,
         height: size.y,
-        depth: 1,
+        depth_or_array_layers: 1,
       },
       usage: wgpu::TextureUsage::COPY_DST | wgpu::TextureUsage::RENDER_ATTACHMENT | usage,
       format,
@@ -337,21 +338,21 @@ impl Core {
 
     // Fill texture
     self.queue.write_texture(
-      wgpu::TextureCopyView {
+      wgpu::ImageCopyTexture {
         texture: &raw,
         mip_level: 0,
         origin: wgpu::Origin3d::ZERO,
       },
       buffer,
-      wgpu::TextureDataLayout {
-        bytes_per_row: bytes_per_row as u32,
+      wgpu::ImageDataLayout {
+        bytes_per_row: NonZeroU32::new(bytes_per_row as u32),
         offset: 0,
-        rows_per_image: size.y,
+        rows_per_image: NonZeroU32::new(size.y),
       },
       wgpu::Extent3d {
         width: size.x,
         height: size.y,
-        depth: 1,
+        depth_or_array_layers: 1,
       },
     );
 
@@ -515,11 +516,11 @@ impl Core {
         (
           *binding,
           match entry {
-            BindGroupEntry::Buffer(buffer) => wgpu::BindingResource::Buffer {
+            BindGroupEntry::Buffer(buffer) => wgpu::BindingResource::Buffer(wgpu::BufferBinding {
               buffer: buffer.get_raw(),
               offset: 0,
               size: None,
-            },
+            }),
             BindGroupEntry::Texture(texture) => {
               wgpu::BindingResource::TextureView(texture.get_raw())
             }
@@ -590,16 +591,17 @@ impl Core {
           },
           primitive: wgpu::PrimitiveState {
             front_face: wgpu::FrontFace::Ccw,
-            cull_mode: wgpu::CullMode::Back,
+            cull_mode: Some(wgpu::Face::Back),
             polygon_mode: wgpu::PolygonMode::Fill,
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
+            clamp_depth: false,
+            conservative: false,
           },
           depth_stencil: desc.depth.map(|depth| wgpu::DepthStencilState {
             bias: wgpu::DepthBiasState::default(),
             stencil: wgpu::StencilState::default(),
             format: depth,
-            clamp_depth: false,
             depth_compare: wgpu::CompareFunction::Less,
             depth_write_enabled: true,
           }),
@@ -611,16 +613,18 @@ impl Core {
               .iter()
               .map(|output| wgpu::ColorTargetState {
                 format: output.format,
-                alpha_blend: wgpu::BlendState {
-                  src_factor: wgpu::BlendFactor::SrcAlpha,
-                  dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                  operation: wgpu::BlendOperation::Add,
-                },
-                color_blend: wgpu::BlendState {
-                  src_factor: wgpu::BlendFactor::SrcAlpha,
-                  dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                  operation: wgpu::BlendOperation::Add,
-                },
+                blend: Some(wgpu::BlendState {
+                  color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::SrcAlpha,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    operation: wgpu::BlendOperation::Add,
+                  },
+                  alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::SrcAlpha,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    operation: wgpu::BlendOperation::Add,
+                  },
+                }),
                 write_mask: wgpu::ColorWrite::all(),
               })
               .collect::<Vec<_>>(),
@@ -661,7 +665,7 @@ impl Core {
         .create_shader_module(&wgpu::ShaderModuleDescriptor {
           label: None,
           source: wgpu::util::make_spirv(&spirv),
-          flags: wgpu::ShaderFlags::VALIDATION,
+          flags: wgpu::ShaderFlags::empty(),
         })
     };
 

@@ -5,7 +5,7 @@ authors = ["Rene Eichhorn <rene.eichhorn1@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-wgpu = "0.7"
+wgpu = "0.8"
 crossbeam = "0.8"
 moonwave_common = { path = "../moonwave_common" }
 moonwave_resources = { path = "../moonwave_resources" }

@@ -5,6 +5,6 @@ authors = ["Rene Eichhorn <rene.eichhorn1@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-cgmath = "0.18"
+cgmath = { version = "0.18",  features = ["swizzle"] } 
 bytemuck = "1.5"
 lazy_static = "1.4"

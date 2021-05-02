@@ -65,21 +65,24 @@ impl<T: UniformStruct + Send + Sync + 'static> Uniform<T> {
 
   pub fn as_generic(&self) -> GenericUniform {
     let content = if self.is_dirty.swap(false, Ordering::Relaxed) {
-      Some(self.content.read().generate_raw_u8())
+      Some(Arc::new(self.content.read().generate_raw_u8()))
     } else {
       None
     };
 
     GenericUniform {
       content,
+      written: Arc::new(AtomicBool::new(false)),
       resources: self.resources.clone(),
       staging_buffer: self.staging_buffer.clone(),
     }
   }
 }
 
+#[derive(Clone)]
 pub struct GenericUniform {
-  content: Option<Vec<u8>>,
+  written: Arc<AtomicBool>,
+  content: Option<Arc<Vec<u8>>>,
   staging_buffer: ResourceRc<Buffer>,
   resources: Arc<PubUniformResources>,
 }
@@ -87,15 +90,17 @@ pub struct GenericUniform {
 impl GenericUniform {
   pub fn get_resources(&self, cmd: &mut CommandEncoder) -> &PubUniformResources {
     if let Some(data) = &self.content {
-      // Update staging buffer.
-      cmd.write_buffer(&self.staging_buffer, &data);
+      if !self.written.swap(true, Ordering::Relaxed) {
+        // Update staging buffer.
+        cmd.write_buffer(&self.staging_buffer, &data);
 
-      // Update actual buffer
-      cmd.copy_buffer_to_buffer(
-        &self.staging_buffer,
-        &self.resources.buffer,
-        data.len() as u64,
-      )
+        // Update actual buffer
+        cmd.copy_buffer_to_buffer(
+          &self.staging_buffer,
+          &self.resources.buffer,
+          data.len() as u64,
+        )
+      }
     }
 
     &self.resources

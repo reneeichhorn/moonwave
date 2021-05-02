@@ -1,21 +1,21 @@
+use itertools::*;
 use legion::world::SubWorld;
 use legion::IntoQuery;
-use moonwave_common::{Vector3, Vector4};
+use moonwave_common::{MetricSpace, Vector4};
 use moonwave_core::*;
 use moonwave_render::{
   CommandEncoder, FrameGraphNode, FrameNodeValue, RenderPassCommandEncoderBuilder,
 };
 use moonwave_resources::{
-  BindGroup, BindGroupDescriptor, BindGroupLayout, Buffer, IndexFormat, RenderPipeline,
-  RenderPipelineDescriptor, ResourceRc, TextureFormat, VertexBuffer,
+  BindGroup, Buffer, IndexFormat, RenderPipeline, ResourceRc, TextureFormat, VertexBuffer,
 };
 use moonwave_shader::VertexStruct;
-use parking_lot::Mutex;
+use rayon::prelude::*;
 use std::sync::Arc;
 
 use crate::{
-  BuiltMaterial, Camera, CameraUniform, DynamicUniformNode, GenericUniform, MainCameraTag,
-  Material, Mesh, MeshIndex, MeshVertex, Model,
+  BoundingShape, BuiltMaterial, Camera, GenericUniform, LightManager, MainCameraTag, Material,
+  Mesh, MeshIndex, MeshVertex, Model,
 };
 
 static REGISTERED_SYSTEM: std::sync::Once = std::sync::Once::new();
@@ -29,7 +29,6 @@ pub struct StaticMeshRenderer {
   index_buffer: ResourceRc<Buffer>,
   index_format: IndexFormat,
   material: Arc<BuiltMaterial>,
-  cache: Arc<Mutex<StaticMeshRendererCache>>,
   bindings: Vec<ResourceRc<BindGroup>>,
 }
 
@@ -68,14 +67,8 @@ impl StaticMeshRenderer {
       material,
       index_format: I::get_format(),
       bindings,
-      cache: Arc::new(Mutex::new(StaticMeshRendererCache::Empty)),
     }
   }
-}
-enum StaticMeshRendererCache {
-  Empty,
-  Creating,
-  Created(ResourceRc<RenderPipeline>),
 }
 
 #[system]
@@ -83,65 +76,76 @@ enum StaticMeshRendererCache {
 #[read_component(Model)]
 #[read_component(MainCameraTag)]
 #[read_component(Camera)]
+#[read_component(BoundingShape)]
+#[read_component(LightManager)]
 pub fn create_pbr_frame_graph(world: &mut SubWorld) {
   optick::event!("create_pbr_frame_graph");
 
   // Get main camera and its frame node.
-  let main_cam_uniform = {
+  let mut main_cam_frustum = [Vector4::<f32>::new(0.0, 0.0, 0.0, 0.0); 6];
+  let (main_cam_uniform, main_cam_eye) = {
     let mut main_cam_query = <(&Camera, &MainCameraTag)>::query();
-    let (main_cam, _) = main_cam_query
-      .iter(world)
-      .next()
-      .unwrap_or_else(|| panic!("No main camera found in scene"));
-    main_cam.uniform.clone()
+    let main_cam = main_cam_query.iter(world).next();
+    if main_cam.is_none() {
+      return;
+    }
+    let (main_cam, _) = main_cam.unwrap();
+    main_cam.calculate_frustum_planes(&mut main_cam_frustum);
+    (main_cam.uniform.clone(), main_cam.position)
+  };
+
+  // Query light manayer.
+  let light_manager_uniform = {
+    let mut query = <&LightManager>::query();
+    let manager = query.iter(world).next().map(|val| val.get_uniform());
+    if manager.is_none() {
+      return;
+    }
+    manager.unwrap()
   };
 
   // Query all static meshes
-  let mut static_objs_query = <(&mut StaticMeshRenderer, &Model)>::query();
-  let single_render_objects = static_objs_query
-    .iter_mut(world)
-    .filter_map(|(obj, model)| {
-      // Build cache
-      let pipeline = {
-        let mut cache_guard = obj.cache.lock();
-        match &*cache_guard {
-          // Cache is already being created, renderer needs to wait therefore.
-          StaticMeshRendererCache::Creating => {
-            return None;
-          }
-          // Create cache for the first time.
-          StaticMeshRendererCache::Empty => {
-            *cache_guard = StaticMeshRendererCache::Creating;
-            let cache = obj.cache.clone();
+  let mut static_objs_query = <(&mut StaticMeshRenderer, &Model, &BoundingShape)>::query();
 
-            let vs = obj.material.vertex_shader.clone();
-            let fs = obj.material.fragment_shader.clone();
-            let layout = obj.material.layout.clone();
-            let vb = obj.vertex_buffer_desc.clone();
+  // Query all relevant visible meshes and calculate cam distance for later depth based sorting.
+  let ready_entities = static_objs_query
+    .par_iter_mut(world)
+    .filter_map(|(obj, model, bshape)| {
+      // Remove out of frustum
+      if !bshape.visible_in_frustum(&main_cam_frustum) {
+        return None;
+      }
 
-            Core::get_instance().spawn_background_task(move || {
-              let pipeline = Core::get_instance().create_render_pipeline(
-                RenderPipelineDescriptor::new(layout, vb, vs, fs)
-                  .add_depth(TextureFormat::Depth32Float)
-                  .add_color_output(TextureFormat::Bgra8UnormSrgb),
-              );
-              *cache.lock() = StaticMeshRendererCache::Created(pipeline);
-            });
-            return None;
-          }
-          // Cache is ready for this object and we can continue.
-          StaticMeshRendererCache::Created(pipeline) => pipeline.clone(),
-        }
-      };
-      Some(SingleRenderObject {
-        pipeline,
-        index_format: obj.index_format,
-        vertex_buffer: obj.vertex_buffer.clone(),
-        index_buffer: obj.index_buffer.clone(),
-        indices: obj.indices,
-        uniforms: vec![main_cam_uniform.as_generic(), model.uniform.as_generic()],
-        bindings: obj.bindings.clone(),
-      })
+      // Calculate distance
+      let distance = model.get().position.distance(main_cam_eye).abs();
+      Some((obj, model, distance))
+    })
+    .collect::<Vec<_>>();
+
+  // Build logical grouping by material.
+  let material_grouped = ready_entities
+    .iter()
+    .into_group_map_by(|(obj, _, _)| obj.material.clone());
+
+  let render_groups = material_grouped
+    .iter()
+    .map(|(material, objs)| RenderGroup {
+      pipeline: material.pbr_pipeline.clone(),
+      objects: objs
+        .iter()
+        .map(|(obj, model, _distance)| SingleRenderObject {
+          index_format: obj.index_format,
+          vertex_buffer: obj.vertex_buffer.clone(),
+          index_buffer: obj.index_buffer.clone(),
+          indices: obj.indices,
+          uniforms: vec![
+            main_cam_uniform.as_generic(),
+            model.uniform.as_generic(),
+            light_manager_uniform.clone(),
+          ],
+          bindings: obj.bindings.clone(),
+        })
+        .collect::<Vec<_>>(),
     })
     .collect::<Vec<_>>();
 
@@ -157,7 +161,7 @@ pub fn create_pbr_frame_graph(world: &mut SubWorld) {
   );
   let pbr_node = frame_graph.add_node(
     PBRRenderGraphNode {
-      objects: single_render_objects,
+      groups: render_groups,
     },
     "pbr_main_node",
   );
@@ -194,10 +198,14 @@ impl SystemFactory for CreatePBRFrameGraphSystem {
 }
 
 struct PBRRenderGraphNode {
+  groups: Vec<RenderGroup>,
+}
+struct RenderGroup {
+  pipeline: ResourceRc<RenderPipeline>,
   objects: Vec<SingleRenderObject>,
 }
+
 struct SingleRenderObject {
-  pipeline: ResourceRc<RenderPipeline>,
   vertex_buffer: ResourceRc<Buffer>,
   index_buffer: ResourceRc<Buffer>,
   index_format: IndexFormat,
@@ -205,6 +213,7 @@ struct SingleRenderObject {
   bindings: Vec<ResourceRc<BindGroup>>,
   indices: u32,
 }
+
 impl PBRRenderGraphNode {
   pub const INPUT_COLOR: usize = 0;
   pub const INPUT_DEPTH: usize = 1;
@@ -220,12 +229,23 @@ impl FrameGraphNode for PBRRenderGraphNode {
   ) {
     optick::event!("FrameGraph::PBR");
 
-    // Prepare uniforms
+    // Access uniforms
     let uniforms = self
-      .objects
+      .groups
       .iter()
-      .flat_map(|object| object.uniforms.iter())
-      .map(|uniform| uniform.get_resources(encoder).bind_group.clone())
+      .map(|group| {
+        group
+          .objects
+          .iter()
+          .map(|obj| {
+            obj
+              .uniforms
+              .iter()
+              .map(|uniform| uniform.get_resources(encoder))
+              .collect::<Vec<_>>()
+          })
+          .collect::<Vec<_>>()
+      })
       .collect::<Vec<_>>();
 
     // Create render pass.
@@ -245,25 +265,36 @@ impl FrameGraphNode for PBRRenderGraphNode {
         .get_sampled_texture()
         .view,
     );
-    let mut rp = encoder.create_render_pass_encoder(rpb);
 
-    let mut uniform_index = 0;
-    for object in &self.objects {
-      // Do the rendering in order.
-      rp.set_vertex_buffer(object.vertex_buffer.clone());
-      rp.set_index_buffer(object.index_buffer.clone(), object.index_format);
-      rp.set_pipeline(object.pipeline.clone());
-      for (index, _uniform) in object.uniforms.iter().enumerate() {
-        rp.set_bind_group(index as u32, uniforms[uniform_index].clone());
-        uniform_index += 1;
+    {
+      optick::event!("FrameGraph::PBR::RenderPass");
+      let mut rp = encoder.create_render_pass_encoder(rpb);
+
+      for (group_index, group) in self.groups.iter().enumerate() {
+        rp.set_pipeline(group.pipeline.clone());
+        for (object_index, object) in group.objects.iter().enumerate() {
+          optick::event!("FrameGraph::PBR::DrawCall");
+
+          // Do the rendering in order.
+          rp.set_vertex_buffer(object.vertex_buffer.clone());
+          rp.set_index_buffer(object.index_buffer.clone(), object.index_format);
+          for (index, _uniform) in object.uniforms.iter().enumerate() {
+            rp.set_bind_group(
+              index as u32,
+              uniforms[group_index][object_index][index]
+                .bind_group
+                .clone(),
+            );
+          }
+          for (index, bind_group) in object.bindings.iter().enumerate() {
+            rp.set_bind_group(
+              object.uniforms.len() as u32 + index as u32,
+              bind_group.clone(),
+            );
+          }
+          rp.render_indexed(0..object.indices);
+        }
       }
-      for (index, bind_group) in object.bindings.iter().enumerate() {
-        rp.set_bind_group(
-          object.uniforms.len() as u32 + index as u32,
-          bind_group.clone(),
-        );
-      }
-      rp.render_indexed(0..object.indices);
     }
   }
 }

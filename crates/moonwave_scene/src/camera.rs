@@ -10,6 +10,7 @@ pub struct CameraUniform {
   projection: Matrix4<f32>,
   view: Matrix4<f32>,
   projection_view: Matrix4<f32>,
+  position: Vector3<f32>,
 }
 
 /// Used to tag the camera actor that is the scenes main / active camera
@@ -50,7 +51,35 @@ impl Camera {
         projection: Matrix4::identity(),
         view: Matrix4::identity(),
         projection_view: Matrix4::identity(),
+        position: Vector3::zero(),
       }),
+    }
+  }
+  pub fn calculate_frustum_planes(&self, planes: &mut [Vector4<f32>; 6]) {
+    // Extract planes from view projection.
+    let vp = self.uniform.get().projection_view;
+    for i in 0..4 {
+      planes[0][i] = vp[i][3] + vp[i][0]
+    } // right
+    for i in 0..4 {
+      planes[1][i] = vp[i][3] - vp[i][0]
+    } // left
+    for i in 0..4 {
+      planes[2][i] = vp[i][3] + vp[i][1]
+    } // top
+    for i in 0..4 {
+      planes[3][i] = vp[i][3] - vp[i][1]
+    } // bottom
+    for i in 0..4 {
+      planes[4][i] = vp[i][3] + vp[i][2]
+    } // far
+    for i in 0..4 {
+      planes[5][i] = vp[i][3] - vp[i][2]
+    } // near
+
+    // Normalize planes
+    for plane in planes {
+      *plane = plane.normalize();
     }
   }
 }
@@ -80,5 +109,5 @@ fn update_camera_matrices(camera: &Camera) {
   uniform.view = view;
   uniform.projection = projection;
   uniform.projection_view = projection_view;
-  //println!("Cam {:?}", uniform.projection);
+  uniform.position = camera.position;
 }

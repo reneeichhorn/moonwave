@@ -1,7 +1,6 @@
+use dds::*;
 use std::io::Cursor;
 
-use image::io::Reader;
-use image::GenericImageView;
 use moonwave_common::Vector2;
 use moonwave_core::optick;
 use moonwave_core::{rayon::prelude::*, Core};
@@ -18,20 +17,14 @@ pub fn create_static_texture(
 ) -> Result<SampledTexture, TextureReadError> {
   optick::event!("scene::texture::create_static_texture");
 
-  #[allow(clippy::single_match)]
-  let format = match decoder {
-    TextureCodec::DDS => image::ImageFormat::Dds,
-  };
+  let (width, height, buffer, format, row_size) = match decoder {
+    TextureCodec::DDS => {
+      // Parse dds.
+      let mut cursor = Cursor::new(data);
+      let dds = DDS::decode(&mut cursor).map_err(|_| TextureReadError::UnexpectedData)?;
+      let width = dds.header.width;
+      let height = dds.header.height;
 
-  let image = Reader::with_format(Cursor::new(data), format)
-    .decode()
-    .map_err(|_| TextureReadError::UnexpectedData)?;
-
-  let (width, height) = image.dimensions();
-
-  // Create row pixel buffer with correct alignment and padding.
-  let (buffer, format, row_size) = match image {
-    image::DynamicImage::ImageRgb8(img) => {
       // Calculate needed byte size for
       let row_size = width * 4;
       let align = 256;
@@ -40,22 +33,27 @@ pub fn create_static_texture(
       let mut buffer = vec![0u8; height as usize * actual_row_size];
       let row_chunks = buffer.chunks_exact_mut(actual_row_size);
 
-      let rows = img.rows().into_iter().collect::<Vec<_>>();
-      rows
+      dds.layers[0]
+        .par_chunks_exact(width as usize)
         .into_par_iter()
         .zip(row_chunks.collect::<Vec<_>>())
         .for_each(|(pixels, row_buffer)| {
-          for (i, pixel) in pixels.enumerate() {
+          for (i, pixel) in pixels.iter().enumerate() {
             let base = i * 4;
-            row_buffer[base] = pixel.0[0];
-            row_buffer[base + 1] = pixel.0[1];
-            row_buffer[base + 2] = pixel.0[2];
-            row_buffer[base + 3] = 255;
+            row_buffer[base] = pixel.r;
+            row_buffer[base + 1] = pixel.g;
+            row_buffer[base + 2] = pixel.b;
+            row_buffer[base + 3] = pixel.a;
           }
         });
-      (buffer, TextureFormat::Rgba8Unorm, actual_row_size)
+      (
+        width,
+        height,
+        buffer,
+        TextureFormat::Rgba8Unorm,
+        actual_row_size,
+      )
     }
-    _ => unimplemented!("The image format is not yet implemented"),
   };
 
   let texture = Core::get_instance().create_inited_sampled_texture(

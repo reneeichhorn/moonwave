@@ -13,5 +13,6 @@ moonwave_resources = { path = "../moonwave_resources" }
 moonwave_shader = { path = "../moonwave_shader" }
 moonwave_render = { path = "../moonwave_render" }
 legion = "0.4"
-image = "0.23"
+dds-rs = { path = "../thirdparty/dds-rs" }
+itertools = "0.10"
 thiserror = "1.0"

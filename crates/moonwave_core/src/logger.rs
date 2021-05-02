@@ -21,14 +21,12 @@ impl log::Log for Logger {
     if target.contains("gfx") || target.contains("naga") {
       return;
     }
-    /*
     if level != Level::Error
       && level != Level::Warn
       && (target.contains("wgpu") || target.contains("gfx"))
     {
       return;
     }
-    */
 
     let message = format!("{}", record.args());
     let now: DateTime<Utc> = Utc::now();

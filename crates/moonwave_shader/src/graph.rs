@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use generational_arena::Arena;
-use moonwave_resources::{BindGroup, VertexAttribute};
+use moonwave_resources::{BindGroup, VertexAttribute, VertexBuffer};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -15,6 +15,7 @@ const MAX_INPUT_OUTPUTS_PER_NODE: usize = 16;
 
 pub struct ShaderGraph {
   vertex_attributes: Vec<VertexAttribute>,
+  vertex_buffer: Option<VertexBuffer>,
   vertex_output_node: Option<Index>,
   color_outputs: Vec<(String, ShaderType, Index)>,
   uniforms: Vec<Uniform>,
@@ -25,6 +26,7 @@ pub struct ShaderGraph {
 impl ShaderGraph {
   pub fn new() -> Self {
     Self {
+      vertex_buffer: None,
       nodes: Arena::with_capacity(MAX_NODES),
       color_outputs: Vec::new(),
       vertex_attributes: Vec::new(),
@@ -40,6 +42,7 @@ impl ShaderGraph {
 
   pub fn add_vertex_attributes<T: VertexStruct + 'static>(&mut self) -> (Index, Index) {
     self.vertex_attributes = T::generate_attributes();
+    self.vertex_buffer = Some(T::generate_buffer());
     let index = self.add_node(VertexAttributesNode {
       attributes: self.vertex_attributes.clone(),
     });
@@ -67,6 +70,7 @@ impl ShaderGraph {
     let node = UniformNode {
       name: name.to_string(),
       attributes: T::generate_attributes(),
+      dependencies: T::generate_dependencies(),
     };
     let index = self.add_node(node);
     let id = Uuid::new_v4();
@@ -332,8 +336,7 @@ impl ShaderGraph {
         name: uniform.name.clone(),
         attributes: uniform.attributes.clone(),
         in_vs: traversed_vertex_shader.contains(&uniform.node_index),
-        in_fs: traversed_fragment_shader.contains(&uniform.node_index)
-          && !shared_nodes.contains(&uniform.node_index),
+        in_fs: traversed_fragment_shader.contains(&uniform.node_index),
       })
       .collect::<Vec<_>>();
 
@@ -388,14 +391,6 @@ impl ShaderGraph {
         .as_str();
       }
 
-      // Uniforms
-      for uniform in &uniforms {
-        if !uniform.in_vs {
-          continue;
-        }
-        Self::generate_uniform(uniform, &mut vertex_shader_code);
-      }
-
       // Code
       let mut function_code = String::with_capacity(1024);
       function_code += "void main() {\n";
@@ -410,6 +405,15 @@ impl ShaderGraph {
       }
       function_code += "}\n";
       vertex_shader_code += global_code.as_str();
+
+      // Uniforms
+      for uniform in &uniforms {
+        if !uniform.in_vs {
+          continue;
+        }
+        Self::generate_uniform(uniform, &mut vertex_shader_code);
+      }
+
       vertex_shader_code += function_code.as_str();
     }
 
@@ -446,20 +450,6 @@ impl ShaderGraph {
         .as_str();
       }
 
-      // Uniforms
-      for uniform in &uniforms {
-        if !uniform.in_fs {
-          continue;
-        }
-        Self::generate_uniform(uniform, &mut fragment_shader_code);
-      }
-      for texture in &textures {
-        if !texture.in_fs {
-          continue;
-        }
-        Self::generate_texture(texture, &mut fragment_shader_code);
-      }
-
       // Code
       let mut function_code = String::with_capacity(1024);
       function_code += "void main() {\n";
@@ -479,7 +469,22 @@ impl ShaderGraph {
       );
       function_code += "}\n";
 
+      // Uniforms
+      for texture in &textures {
+        if !texture.in_fs {
+          continue;
+        }
+        Self::generate_texture(texture, &mut fragment_shader_code);
+      }
       fragment_shader_code += global_code.as_str();
+
+      for uniform in &uniforms {
+        if !uniform.in_fs {
+          continue;
+        }
+        Self::generate_uniform(uniform, &mut fragment_shader_code);
+      }
+
       fragment_shader_code += function_code.as_str();
     }
 
@@ -493,6 +498,7 @@ impl ShaderGraph {
     }
 
     BuiltShaderGraph {
+      vb: self.vertex_buffer.clone().unwrap(),
       vs: vertex_shader_code,
       fs: fragment_shader_code,
       bind_groups,
@@ -507,7 +513,12 @@ impl ShaderGraph {
     .as_str();
 
     for attr in &uniform.attributes {
-      *output += format!("\t{} {};\n", attr.1.get_glsl_type(), attr.0).as_str();
+      *output += format!(
+        "\t{} {};\n",
+        attr.1.get_glsl_type(),
+        attr.1.get_glsl_var(&attr.0)
+      )
+      .as_str();
     }
 
     *output += format!("}} {};\n", uniform.name).as_str();
@@ -566,12 +577,13 @@ impl ShaderGraph {
 
   fn dedup_unordered(list: &[Index]) -> Vec<Index> {
     let mut deduped = Vec::new();
-    for item in list {
+    for item in list.iter().rev() {
       if deduped.contains(item) {
         continue;
       }
       deduped.push(*item);
     }
+    deduped.reverse();
     deduped
   }
 
@@ -616,7 +628,7 @@ impl ShaderGraph {
       if let Some(input) = input {
         // Is target node a passthrough
         let target_node = self.nodes.get(input.owner_node_index).unwrap();
-        if target_node.node.is_passthrough() {
+        if let Some(_) = target_node.node.as_passthrough() {
           changes.push((
             index,
             target_node.inputs[input.owner_node_output].clone().unwrap(),
@@ -635,7 +647,7 @@ impl ShaderGraph {
   }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Node {
   inputs: [Option<Input>; MAX_INPUT_OUTPUTS_PER_NODE],
   node: Arc<dyn ShaderNode>,
@@ -662,7 +674,7 @@ struct Texture {
   node_index: Index,
 }
 
-pub trait ShaderNode: Send + Sync + 'static {
+pub trait ShaderNode: std::fmt::Debug + Send + Sync + 'static {
   fn get_available_stages(&self) -> (bool, bool) {
     (true, true)
   }
@@ -675,8 +687,8 @@ pub trait ShaderNode: Send + Sync + 'static {
     Vec::new()
   }
 
-  fn is_passthrough(&self) -> bool {
-    false
+  fn as_passthrough(&self) -> Option<&InputPassthroughNode> {
+    None
   }
 
   fn generate(&self, inputs: &[Option<String>], outputs: &[Option<String>], output: &mut String);
@@ -690,7 +702,7 @@ pub trait ShaderNode: Send + Sync + 'static {
   }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct VertexAttributesNode {
   attributes: Vec<VertexAttribute>,
 }
@@ -721,6 +733,7 @@ impl ShaderNode for VertexAttributesNode {
   }
 }
 
+#[derive(Debug)]
 struct VertexShaderOutputNode;
 
 impl ShaderNode for VertexShaderOutputNode {
@@ -737,6 +750,7 @@ impl ShaderNode for VertexShaderOutputNode {
   }
 }
 
+#[derive(Debug)]
 struct ColorOutputNode {
   name: String,
 }
@@ -752,10 +766,14 @@ impl ShaderNode for ColorOutputNode {
     *output += format!("f_{} = {};\n", self.name, inputs[0].as_ref().unwrap()).as_str();
   }
 }
+
+#[derive(Debug)]
 struct UniformNode {
   name: String,
   attributes: Vec<(String, ShaderType)>,
+  dependencies: Vec<(String, Vec<(String, ShaderType)>)>,
 }
+
 impl ShaderNode for UniformNode {
   fn get_outputs(&self) -> Vec<ShaderType> {
     self
@@ -765,12 +783,27 @@ impl ShaderNode for UniformNode {
       .collect::<Vec<_>>()
   }
 
+  fn generate_global_code(
+    &self,
+    _inputs: &[Option<String>],
+    _outputs: &[Option<String>],
+    output: &mut String,
+  ) {
+    for (name, attributes) in &self.dependencies {
+      *output += format!("struct {} {{\n", name).as_str();
+      for (attr_name, ty) in attributes {
+        *output += format!("{} {};\n", ty.get_glsl_type(), ty.get_glsl_var(&attr_name)).as_str();
+      }
+      *output += "};\n\n";
+    }
+  }
+
   fn generate(&self, _inputs: &[Option<String>], outputs: &[Option<String>], output: &mut String) {
     for (index, (name, ty)) in self.attributes.iter().enumerate() {
       *output += format!(
         "{} {} = {}_uniform.{};\n",
         ty.get_glsl_type(),
-        outputs[index].as_ref().unwrap(),
+        ty.get_glsl_var(outputs[index].as_ref().unwrap()),
         self.name,
         name,
       )
@@ -779,6 +812,7 @@ impl ShaderNode for UniformNode {
   }
 }
 
+#[derive(Debug)]
 struct TextureNode {
   name: String,
 }
@@ -815,6 +849,7 @@ impl ShaderNode for TextureNode {
   }
 }
 
+#[derive(Debug)]
 pub struct TextureSampleNode;
 
 impl TextureSampleNode {
@@ -839,6 +874,7 @@ impl ShaderNode for TextureSampleNode {
   }
 }
 
+#[derive(Debug)]
 pub struct InputPassthroughNode {
   inputs: Vec<(ShaderType, String)>,
 }
@@ -855,8 +891,8 @@ impl InputPassthroughNode {
 }
 
 impl ShaderNode for InputPassthroughNode {
-  fn is_passthrough(&self) -> bool {
-    true
+  fn as_passthrough(&self) -> Option<&Self> {
+    Some(self)
   }
 
   fn generate(
@@ -891,6 +927,7 @@ pub struct BuiltTexture {
 
 #[derive(Debug)]
 pub struct BuiltShaderGraph {
+  pub vb: VertexBuffer,
   pub vs: String,
   pub fs: String,
   pub bind_groups: Vec<BuiltShaderBindGroup>,

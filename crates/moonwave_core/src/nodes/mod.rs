@@ -100,9 +100,9 @@ impl FrameGraphNode for PresentToScreen {
       {
         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
           label: Some("RenderPassPresentToScreen"),
-          color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
+          color_attachments: &[wgpu::RenderPassColorAttachment {
             resolve_target: None,
-            attachment: &sc_frame.output.view,
+            view: &sc_frame.output.view,
             ops: wgpu::Operations {
               load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
               store: true,

@@ -2,9 +2,10 @@ use crate::Core;
 use async_std::sync::{RwLock as AsyncRwLock, RwLockWriteGuard as AsyncRwLockWriteGuard};
 use futures::{executor::block_on, future::join_all, Future};
 use itertools::Itertools;
-use legion::World as LegionWorld;
 use legion::*;
+use legion::{query::EntityFilter, World as LegionWorld};
 pub use legion::{system, Entity};
+use log::debug;
 use once_cell::sync::OnceCell;
 use owning_ref::{OwningRef, OwningRefMut};
 use parking_lot::{Mutex, RwLock};
@@ -15,7 +16,7 @@ use std::{
   pin::Pin,
   sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Weak,
   },
 };
 
@@ -29,18 +30,24 @@ pub struct World {
   built_systems: RwLock<Vec<SendWrapper<Schedule>>>,
   /// Temporary systems that are always executed just once.
   temp_systems: Mutex<Vec<Box<dyn ParallelRunnable>>>,
+  /// Temporary systems that are always executed just once.
+  event_systems: Mutex<Vec<Box<dyn ParallelRunnable>>>,
   /// Command buffers that are waiting to be executed.
-  command_buffers: Mutex<Vec<CommandBuffer>>,
+  command_buffers: Mutex<Vec<(CommandBuffer, Option<Arc<ActorInnerRef>>)>>,
 }
 
 impl World {
   /// Creates a new empty world without entities and systems.
   pub fn new() -> Self {
+    let mut world = LegionWorld::new(WorldOptions::default());
+    world.subscribe(EventLogger {}, legion::any());
+
     Self {
       systems_dirty: AtomicBool::new(false),
       built_systems: RwLock::new(Vec::new()),
-      world: LegionWorld::new(WorldOptions::default()),
+      world,
       systems: RwLock::new(Vec::new()),
+      event_systems: Mutex::new(Vec::with_capacity(128)),
       temp_systems: Mutex::new(Vec::with_capacity(128)),
       command_buffers: Mutex::new(Vec::with_capacity(128)),
     }
@@ -52,10 +59,25 @@ impl World {
     staging.push(system);
   }
 
+  /// Schedule event
+  pub fn publish_event<T: Component + Clone + Sized + 'static>(&self, event: T) {
+    let mut systems = self.event_systems.lock();
+    systems.push(Box::new(actor_event_publish_system(event)));
+  }
+
   /// Adds a temporary system to the world that will be executed exactly once.
-  pub fn add_command_buffer(&self, cmd: CommandBuffer) {
+  pub(crate) fn add_command_buffer(
+    &self,
+    cmd: CommandBuffer,
+    front: bool,
+    owner: Option<Arc<ActorInnerRef>>,
+  ) {
     let mut staging = self.command_buffers.lock();
-    staging.push(cmd);
+    if front {
+      staging.insert(0, (cmd, owner));
+    } else {
+      staging.push((cmd, owner));
+    }
   }
 
   /// Adds a system to the default application stage causing the system tree to be
@@ -101,6 +123,18 @@ impl World {
     *self.built_systems.write() = built;
   }
 
+  pub(crate) fn execute_commands(&mut self, resources: &mut Resources) {
+    optick::event!("World::tick::command_buffers");
+
+    #[allow(clippy::needless_collect)]
+    {
+      let buffers = self.command_buffers.lock().drain(..).collect::<Vec<_>>();
+      for (mut buffer, _owner) in buffers.into_iter() {
+        buffer.flush(&mut self.world, resources);
+      }
+    }
+  }
+
   pub fn tick(&mut self, elapsed: u64, pool: &ThreadPool) {
     // Trigger schedule rebuilding if needed.
     self.rebuild_schedule();
@@ -109,6 +143,40 @@ impl World {
     let mut resources = Resources::default();
     resources.insert(FrameElapsedTime(elapsed));
 
+    // Execute
+    self.execute_commands(&mut resources);
+
+    // Event systems
+    {
+      optick::event!("World::tick::event");
+      loop {
+        optick::event!("World::tick::event::iteration");
+
+        // Drain event systems until empty.
+        let systems = {
+          let mut systems = self.event_systems.lock();
+          systems.drain(..).collect::<Vec<_>>()
+        };
+        if systems.is_empty() {
+          break;
+        }
+
+        // Execute systems
+        let mut builder = Schedule::builder();
+        for temp in systems {
+          builder.add_system(WrappedSystem(temp));
+        }
+
+        {
+          optick::event!("World::tick::event::iteration::execute");
+          builder
+            .build()
+            .execute_in_thread_pool(&mut self.world, &mut resources, pool);
+        }
+      }
+    }
+
+    // Execute world systems
     {
       optick::event!("World::tick::systems");
       let mut systems = self.built_systems.write();
@@ -129,17 +197,12 @@ impl World {
         .build()
         .execute_in_thread_pool(&mut self.world, &mut resources, pool)
     }
-
-    // Command buffers
-    #[allow(clippy::needless_collect)]
-    {
-      optick::event!("World::tick::command_buffers");
-      let buffers = self.command_buffers.lock().drain(..).collect::<Vec<_>>();
-      for mut buffer in buffers.into_iter().rev() {
-        buffer.flush(&mut self.world, &mut resources);
-      }
-    }
   }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Res {
+  a: f32,
 }
 
 /// System resource that holds the elapsed time since previous frame.
@@ -332,9 +395,8 @@ impl<'a, T: Spawnable> std::ops::DerefMut for UnlockedSpawnMut<'a, T> {
 }
 
 pub struct WeakSpawn<T: Spawnable> {
+  actor: Arc<ActorInnerRef>,
   cmd: CommandBuffer,
-  entity: Entity,
-  level: usize,
   _p: PhantomData<T>,
 }
 
@@ -360,38 +422,37 @@ impl<'a, T: Spawnable> SubWeakSpawn<'a, T> {
 }
 
 impl<T: Spawnable + Send + Sync + 'static> WeakSpawn<T> {
-  pub fn new(entity: Entity, level: usize) -> Self {
+  fn new(inner: Arc<ActorInnerRef>) -> Self {
     Self {
-      entity,
-      level,
+      actor: inner,
       cmd: CommandBuffer::new(&Core::get_instance().get_world().world),
       _p: PhantomData {},
     }
   }
 
   pub fn spawn_actor<S: Spawnable + Send + Sync + 'static>(&mut self, s: S) -> SubWeakSpawn<S> {
-    let actor = s.spawn(Some(self.entity), self.level + 1, &mut self.cmd);
+    let actor = s.spawn(Some(self.actor.entity), self.actor.level + 1, &mut self.cmd);
     SubWeakSpawn {
       cmd: &mut self.cmd,
       entity: actor.inner.entity,
       rc: actor,
-      _level: self.level + 1,
+      _level: self.actor.level + 1,
     }
   }
 
   pub fn add_component<C: Component>(&mut self, c: C) {
-    self.cmd.add_component(self.entity, c);
+    self.cmd.add_component(self.actor.entity, c);
   }
 
   pub fn remove_component<C: Component>(&mut self) {
-    self.cmd.remove_component::<C>(self.entity);
+    self.cmd.remove_component::<C>(self.actor.entity);
   }
 
   pub fn exec_mut<F: 'static + FnOnce(&mut UnlockedWeakSpawn<'_, T>) + Send + Sync>(
     &mut self,
     f: F,
   ) {
-    let entity = self.entity;
+    let entity = self.actor.entity;
     let once = Mutex::new(Some(f));
 
     self.cmd.exec_mut(move |world, _| {
@@ -410,7 +471,7 @@ impl<T: Spawnable + Send + Sync + 'static> WeakSpawn<T> {
   pub fn flush(self) {
     Core::get_instance()
       .get_world()
-      .add_command_buffer(self.cmd);
+      .add_command_buffer(self.cmd, false, Some(self.actor.clone()));
   }
 }
 
@@ -452,12 +513,19 @@ impl<'a, T: Spawnable + Send + Sync + 'static> std::ops::DerefMut for UnlockedWe
 
 /// Base actor component added to _all_ spawned actors during runtime.
 pub struct Actor {
+  weak: Weak<ActorInnerRef>,
   /// The entity id of the parent of the spawned actor if available.
   pub parent: Option<Entity>,
   /// The level of the spawned actor.
   pub level: usize,
   #[doc(hidden)]
   pub timers: Vec<Timer>,
+}
+
+impl Actor {
+  pub fn get_weak<T: Spawnable + Send + Sync + 'static>(&self) -> Option<WeakSpawn<T>> {
+    self.weak.upgrade().map(WeakSpawn::new)
+  }
 }
 
 // Actor reference collection and actor despawning on drop.
@@ -485,16 +553,20 @@ impl<T: Send + Sync + 'static> ActorRc<T> {
     level: usize,
     timers: Vec<Timer>,
   ) -> Self {
-    let entity = cmd.push((
-      value,
+    let entity = cmd.push((value, Res { a: 0.0 }));
+    let arc = Arc::new(ActorInnerRef { entity, level });
+    cmd.add_component(
+      entity,
       Actor {
         level,
         parent,
         timers,
+        weak: Arc::downgrade(&arc),
       },
-    ));
+    );
+
     ActorRc {
-      inner: Arc::new(ActorInnerRef { entity }),
+      inner: arc,
       _p: PhantomData {},
     }
   }
@@ -502,10 +574,29 @@ impl<T: Send + Sync + 'static> ActorRc<T> {
   pub fn get_entity(&self) -> Entity {
     self.inner.entity
   }
+
+  pub fn entry(&self) -> ActorEntry<'_> {
+    let entry = Core::get_instance()
+      .get_world()
+      .world
+      .entry_ref(self.inner.entity);
+
+    // Unwrap is safe here as entity will be only dropped when all reference to it are removed
+    ActorEntry {
+      entry: entry.unwrap(),
+    }
+  }
 }
 
-struct ActorInnerRef {
+impl<T: Spawnable + Send + Sync + 'static> ActorRc<T> {
+  pub fn get_weak(&self) -> WeakSpawn<T> {
+    WeakSpawn::new(self.inner.clone())
+  }
+}
+
+pub(crate) struct ActorInnerRef {
   entity: Entity,
+  level: usize,
 }
 pub struct WrappedEntity(pub Entity);
 
@@ -521,4 +612,58 @@ impl Drop for ActorInnerRef {
 #[system]
 fn actor_drop_system(#[state] entity: &WrappedEntity, cmd: &mut CommandBuffer) {
   cmd.remove(entity.0);
+}
+
+pub struct Reader<T: Send + Sync + 'static> {
+  pub _p: PhantomData<T>,
+}
+impl<T: Send + Sync + 'static> Clone for Reader<T> {
+  fn clone(&self) -> Reader<T> {
+    Reader { _p: PhantomData }
+  }
+}
+impl<T: Send + Sync + 'static> Copy for Reader<T> {}
+
+pub struct ActorEntry<'a> {
+  pub entry: EntryRef<'a>,
+}
+
+impl<'a> ActorEntry<'a> {
+  pub fn get<C: Send + Sync + 'static>(&self, _reader: Reader<C>) -> Option<&C> {
+    self.entry.get_component::<C>().ok()
+  }
+}
+
+// Event system
+/////////////////////////////////////////////////////////
+
+pub struct EventReceiver<T: Component + Clone + Sized + 'static> {
+  received: Vec<T>,
+}
+
+impl<T: Component + Clone + Sized + 'static> EventReceiver<T> {
+  pub fn new() -> Self {
+    Self {
+      received: Vec::new(),
+    }
+  }
+  pub fn drain(&mut self) -> std::vec::Drain<T> {
+    self.received.drain(..)
+  }
+}
+
+#[system(for_each)]
+fn actor_event_publish<T: Component + Clone + Sized + 'static>(
+  receiver: &mut EventReceiver<T>,
+  #[state] event: &T,
+) {
+  receiver.received.push(event.clone());
+}
+
+struct EventLogger;
+impl EventSender for EventLogger {
+  fn send(&self, event: Event) -> bool {
+    //debug!("Legion event received | {:?}", event);
+    true
+  }
 }

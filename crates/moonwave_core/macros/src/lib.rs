@@ -5,8 +5,8 @@ use quote::{format_ident, quote};
 use syn::{
   parenthesized,
   parse::{Parse, ParseStream},
-  parse2, parse_quote, FnArg, ImplItem, ImplItemMethod, ItemImpl, ItemTrait, LitInt, TraitItem,
-  Type,
+  parse2, parse_quote, FnArg, GenericArgument, ImplItem, ImplItemMethod, ItemImpl, ItemTrait,
+  LitInt, Path, PathArguments, TraitItem, Type,
 };
 use syn::{parse_macro_input, ItemStruct, Result, Token};
 
@@ -53,6 +53,7 @@ impl Item {
           Type::Path(path) => path.path.get_ident().unwrap(),
           _ => panic!("Unknown implementation ident"),
         };
+        let self_ident_var = format_ident!("{}", ident.to_string().to_snake_case());
 
         // Timers are tick based functions that are executed every frame
         let mut timers = Vec::new();
@@ -60,6 +61,8 @@ impl Item {
         let mut spawns = Vec::new();
         // Items are "normal" actor methods.
         let mut items = Vec::new();
+        // Event receivers that are hooked for this actor.
+        let mut event_receiver = Vec::new();
 
         'outer: for item in &im.items {
           match item {
@@ -106,6 +109,28 @@ impl Item {
                       items.push(ImplItem::Method(regular));
                     }
                   }
+                  "actor_event" => {
+                    let has_attributes = attr.tokens.clone().into_iter().next().is_some();
+                    let spawn_type = if has_attributes {
+                      SpawnType::Background
+                    } else {
+                      SpawnType::Blocking
+                    };
+
+                    let mut item = method.clone();
+                    let event_data_input = item.sig.inputs.pop().unwrap();
+                    let ty = match event_data_input.value() {
+                      FnArg::Typed(ty) => ty.clone(),
+                      _ => panic!("Expected event data as last parameter for event receiver."),
+                    };
+                    let actor_method = ActorMethod::new(ident.clone(), &item);
+
+                    event_receiver.push((item, actor_method, ty, spawn_type));
+
+                    let mut regular = method.clone();
+                    regular.attrs.clear();
+                    items.push(ImplItem::Method(regular));
+                  }
                   _ => {}
                 }
               }
@@ -120,6 +145,60 @@ impl Item {
           }
         }
 
+        // Create event receiver
+        let (event_receiver_spawn, event_receiver_impl) = if !event_receiver.is_empty() {
+          let components = event_receiver.iter().map(|recv| {
+            let event_data_type = &recv.2.ty;
+            quote! {
+              cmd.add_component(entity, moonwave_core::EventReceiver::<#event_data_type>::new());
+            }
+          });
+
+          let drains = event_receiver.iter().map(|recv| {
+            let event_data_type = &recv.2.ty;
+            let event_data_var = format_ident!(
+              "moonwave_core_event_receiver_{}",
+              get_ident_of_type(&event_data_type)
+                .to_string()
+                .to_snake_case(),
+            );
+            let event_name = &recv.1.method.sig.ident;
+            let vars = recv.1.usages.iter().map(|c| c.name());
+
+            let event_impl = if recv.3 == SpawnType::Background {
+              quote! {
+                let mut weak = actor.get_weak::<#ident>().unwrap();
+                Core::get_instance().spawn_background_task(move || {
+                  #[allow(clippy::unnecessary_mut_passed)]
+                  #ident::#event_name(&mut weak, #(#vars),* event);
+                  weak.flush();
+                });
+              }
+            } else {
+              quote! {
+                #self_ident_var.#event_name(#(#vars),* event);
+              }
+            };
+
+            quote! {
+              for event in #event_data_var.drain() {
+                #event_impl
+              }
+            }
+          });
+
+          (
+            Some(quote! {
+              #(#components)*
+            }),
+            Some(quote! {
+              #(#drains)*
+            }),
+          )
+        } else {
+          (None, None)
+        };
+
         // Create spawn system
         let mut cloned_register = Vec::new();
         let mut before_move = TokenStream2::new();
@@ -131,7 +210,7 @@ impl Item {
           let event = format!("Actor::{}::spawn", ident.to_string());
 
           // Collect all used components.
-          let (component_streams, query_types, names) =
+          let (component_streams, query_types, names, rw) =
             ActorMethod::combined(&spawns.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>());
 
           // Map all spawn functions
@@ -164,9 +243,19 @@ impl Item {
                 use legion::IntoQuery;
                 moonwave_core::optick::event!(#event);
 
+                // Trigger spawn functions
+                let mut triggered = false;
                 let mut query = <(legion::Entity, &moonwave_core::Actor, #query_types)>::query();
                 for (entity, actor, #names) in query.iter_mut(world).filter(|(entity, ..)| *entity == &new_entity.0) {
+                  triggered = true;
                   #(#calls)*
+                }
+
+                // Reschedule spawn system if not not ready yet.
+                if !triggered {
+                  moonwave_core::Core::get_instance()
+                    .get_world()
+                    .add_temp_system(Box::new(#system_create_ident(moonwave_core::WrappedEntity(new_entity.0))));
                 }
               }
             });
@@ -204,8 +293,9 @@ impl Item {
               register_stream.extend(quote! {
                 {
                   let core = moonwave_core::Core::get_instance();
+                  let mut weak = actor_ref.get_weak();
                   core.spawn_background_task(move || {
-                    let mut weak = moonwave_core::WeakSpawn::<#ident>::new(entity, level);
+                    #rw
                     #[allow(clippy::unnecessary_mut_passed)]
                     #ident::#method(&mut weak, #(#cloned_params),*);
                     weak.flush();
@@ -239,9 +329,9 @@ impl Item {
           });
 
         // Build Tick system and registers
-        let (tick_system, tick_register) = if !timers.is_empty() {
+        let (tick_system, tick_register) = if !timers.is_empty() || !event_receiver.is_empty() {
           let event = format!("Actor::{}::tick", ident.to_string());
-          let self_ident = timers[0].method.self_usage.name();
+          let self_ident = self_ident_var.clone();
           let tick_system_ident_register = format_ident!(
             "{}",
             format!("{}TickSystemRegister", ident.to_string()).to_shouty_snake_case()
@@ -253,8 +343,28 @@ impl Item {
           let repeated = (0..8).map(|_| quote! { std::sync::Once::new() });
 
           // Collect all used components.
-          let (component_streams, query_types, names) =
-            ActorMethod::combined(&timers.iter().map(|t| t.method.clone()).collect::<Vec<_>>());
+          let event_componentns = event_receiver.iter().map(|e| e.1.clone());
+          let event_recv_components = event_receiver.iter().map(|e| {
+            let component = get_path_of_type(&e.2.ty);
+            ActorMethod {
+              usages: vec![ComponentUsage {
+                reader: false,
+                name: get_ident_of_pat(&e.2.pat),
+                component: parse_quote! { moonwave_core::EventReceiver<#component> },
+                mutable: true,
+              }],
+              method: event_receiver[0].1.method.clone(),
+              self_usage: event_receiver[0].1.self_usage.clone(),
+            }
+          });
+          let (component_streams, query_types, names, rw) = ActorMethod::combined(
+            &timers
+              .iter()
+              .map(|t| t.method.clone())
+              .chain(event_componentns)
+              .chain(event_recv_components)
+              .collect::<Vec<_>>(),
+          );
 
           // Map ticks
           let mut timer_index = 0usize;
@@ -292,9 +402,11 @@ impl Item {
               fn #tick_system_ident(#[state] level: &usize, #[resource] elapsed: &moonwave_core::FrameElapsedTime, world: &mut legion::world::SubWorld) {
                 use legion::IntoQuery;
                 moonwave_core::optick::event!(#event);
-                let mut query = <(&mut moonwave_core::Actor, #query_types)>::query();
-                for (actor, #names) in query.iter_mut(world).filter(|(actor, ..)| actor.level == *level) {
+                let mut query = <(legion::Entity, &mut moonwave_core::Actor, #query_types)>::query();
+                for (entity, actor, #names) in query.iter_mut(world).filter(|(_, actor, ..)| actor.level == *level) {
+                  #rw
                   #({ #ticks })*
+                  #event_receiver_impl
                 }
               }
             }),
@@ -338,13 +450,16 @@ impl Item {
 
               // Spawn actor into world.
               #before_move
-              let actor = moonwave_core::ActorRc::new(cmd, self, parent, level, timers);
-              let entity = actor.get_entity();
+              let actor_ref = moonwave_core::ActorRc::new(cmd, self, parent, level, timers);
+              let entity = actor_ref.get_entity();
+
+              // Add event receiver
+              #event_receiver_spawn
 
               // Temporarly insert spawn system.
               #spawn_system_register
 
-              actor
+              actor_ref
             }
           }
         }
@@ -376,18 +491,19 @@ struct Tick {
   method: ActorMethod,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ActorMethod {
   method: ImplItemMethod,
   self_usage: ComponentUsage,
   usages: Vec<ComponentUsage>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ComponentUsage {
   mutable: bool,
+  reader: bool,
   name: syn::Ident,
-  component: syn::Ident,
+  component: syn::Path,
 }
 
 impl ComponentUsage {
@@ -401,7 +517,11 @@ impl ComponentUsage {
   }
 
   pub fn name(&self) -> syn::Ident {
-    format_ident!("{}", self.component.to_string().to_snake_case())
+    if self.reader {
+      return self.name.clone();
+    }
+
+    format_ident!("{}", path_to_string_ident(&self.component).to_snake_case())
   }
 
   pub fn extend_stream(&self, stream: &mut TokenStream2) {
@@ -418,6 +538,20 @@ impl ComponentUsage {
   }
 }
 
+fn get_ident_of_type(ty: &syn::Type) -> syn::Ident {
+  match ty {
+    syn::Type::Path(path) => path.path.get_ident().unwrap().clone(),
+    _ => panic!("Not a ident type"),
+  }
+}
+
+fn get_path_of_type(ty: &syn::Type) -> syn::Path {
+  match ty {
+    syn::Type::Path(path) => path.path.clone(),
+    _ => panic!("Not a ident type"),
+  }
+}
+
 fn get_ident_of_pat(pat: &syn::Pat) -> syn::Ident {
   match pat {
     syn::Pat::Ident(ident) => ident.ident.clone(),
@@ -426,7 +560,58 @@ fn get_ident_of_pat(pat: &syn::Pat) -> syn::Ident {
   }
 }
 
+fn path_to_string_ident(path: &Path) -> String {
+  path
+    .segments
+    .iter()
+    .map(|segment| {
+      let postfix = match &segment.arguments {
+        PathArguments::AngleBracketed(x) => match x.args.first().as_ref().unwrap() {
+          GenericArgument::Type(Type::Path(path)) => {
+            format!("_{}_", path_to_string_ident(&path.path))
+          }
+          _ => "".to_string(),
+        },
+        _ => "".to_string(),
+      };
+      format!("{}{}", segment.ident.to_string(), postfix)
+    })
+    .collect::<Vec<_>>()
+    .join("_")
+}
+
 impl ActorMethod {
+  fn from_path(path: &Path, pat: &syn::Pat, mutable: bool) -> ComponentUsage {
+    let reader = path
+      .segments
+      .first()
+      .map(|seg| seg.ident.to_string() == "Reader")
+      .unwrap_or(false);
+
+    let reader_component = if reader {
+      let p = path.segments.first().unwrap();
+      match &p.arguments {
+        PathArguments::AngleBracketed(angle) => {
+          let arg = angle.args.first().unwrap();
+          match arg {
+            GenericArgument::Type(Type::Path(path)) => Some(path.path.clone()),
+            _ => unimplemented!(),
+          }
+        }
+        _ => unimplemented!(),
+      }
+    } else {
+      None
+    };
+
+    ComponentUsage {
+      reader,
+      name: get_ident_of_pat(pat),
+      mutable,
+      component: reader_component.unwrap_or_else(|| path.clone()),
+    }
+  }
+
   pub fn new(self_ident: syn::Ident, method: &ImplItemMethod) -> Self {
     // Build self usage.
     let method_self = match method
@@ -440,10 +625,11 @@ impl ActorMethod {
     };
     let self_usage = ComponentUsage {
       name: format_ident!("self"),
+      reader: false,
       mutable: method_self
         .map(|m| m.mutability.is_some())
         .unwrap_or_default(),
-      component: self_ident,
+      component: parse_quote! { #self_ident },
     };
 
     // Iterate through all other dependencies.
@@ -454,17 +640,13 @@ impl ActorMethod {
       .skip(1)
       .filter_map(|arg| match arg {
         FnArg::Typed(typed) => match &*typed.ty {
-          /*Type::Path(path) => Some(ComponentUsage {
-            name: get_ident_of_pat(&typed.pat),
-            mutable: false,
-            component: path.path.get_ident().unwrap().clone(),
-          }),*/
+          Type::Path(path) => Some(Self::from_path(&path.path, &typed.pat, false)),
           Type::Reference(ty_ref) => match &*ty_ref.elem {
-            Type::Path(path) => Some(ComponentUsage {
-              name: get_ident_of_pat(&typed.pat),
-              mutable: ty_ref.mutability.is_some(),
-              component: path.path.get_ident().unwrap().clone(),
-            }),
+            Type::Path(path) => Some(Self::from_path(
+              &path.path,
+              &typed.pat,
+              ty_ref.mutability.is_some(),
+            )),
             _ => None,
           },
           _ => None,
@@ -480,19 +662,22 @@ impl ActorMethod {
     }
   }
 
-  pub fn combined(inputs: &[ActorMethod]) -> (TokenStream2, TokenStream2, TokenStream2) {
+  pub fn combined(
+    inputs: &[ActorMethod],
+  ) -> (TokenStream2, TokenStream2, TokenStream2, TokenStream2) {
     let self_mutable = inputs.iter().any(|t| t.self_usage.mutable);
     let mut components = inputs
       .iter()
       .flat_map(|t| t.usages.clone())
       .collect::<Vec<_>>();
-    components.sort_unstable_by_key(|u| u.component.clone());
+    components.sort_unstable_by_key(|u| path_to_string_ident(&u.component));
     components.dedup_by_key(|u| u.component.clone());
 
     // Build stream for component refs
     let component_streams = {
       let mut stream = TokenStream2::new();
       ComponentUsage {
+        reader: false,
         mutable: self_mutable,
         name: format_ident!("self"),
         component: inputs[0].self_usage.component.clone(),
@@ -507,11 +692,15 @@ impl ActorMethod {
     // Build stream for the query
     let query_stream = {
       let all = [ComponentUsage {
+        reader: false,
         mutable: self_mutable,
         name: format_ident!("self"),
         component: inputs[0].self_usage.component.clone(),
       }];
-      let usages = all.iter().chain(components.iter()).map(|m| m.query_type());
+      let usages = all
+        .iter()
+        .chain(components.iter().filter(|c| !c.reader))
+        .map(|m| m.query_type());
 
       quote! {
         #(#usages),*
@@ -521,18 +710,36 @@ impl ActorMethod {
     // Build stream for the query
     let names = {
       let all = [ComponentUsage {
+        reader: false,
         mutable: self_mutable,
         name: format_ident!("self"),
         component: inputs[0].self_usage.component.clone(),
       }];
-      let usages = all.iter().chain(components.iter()).map(|m| m.name());
+      let usages = all
+        .iter()
+        .chain(components.iter().filter(|c| !c.reader))
+        .map(|m| m.name());
 
       quote! {
         #(#usages),*
       }
     };
 
-    (component_streams, query_stream, names)
+    // Build reader/writer streams
+    let reader_writer = {
+      let streams = components.iter().filter(|c| c.reader).map(|c| {
+        let name = &c.name;
+        let component = &c.component;
+        quote! {
+          let #name: Reader<#component> = Reader { _p:  std::marker::PhantomData };
+        }
+      });
+      quote! {
+        #(#streams)*
+      }
+    };
+
+    (component_streams, query_stream, names, reader_writer)
   }
 }
 

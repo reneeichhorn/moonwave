@@ -1,7 +1,7 @@
 #![allow(clippy::new_without_default)]
 
-use std::marker::PhantomData;
-use std::sync::Arc;
+use std::{hash::Hash, marker::PhantomData};
+use std::{hash::Hasher, sync::Arc};
 
 pub use wgpu::{IndexFormat, TextureFormat, TextureUsage};
 
@@ -19,6 +19,20 @@ pub struct ResourceRc<T> {
   life: Arc<ResourceLife>,
   _ty: PhantomData<T>,
 }
+
+impl<T> Hash for ResourceRc<T> {
+  fn hash<H: Hasher>(&self, state: &mut H) {
+    Arc::as_ptr(&self.life).hash(state);
+  }
+}
+
+impl<T> PartialEq for ResourceRc<T> {
+  fn eq(&self, other: &Self) -> bool {
+    Arc::as_ptr(&self.life).eq(&Arc::as_ptr(&other.life))
+  }
+}
+
+impl<T> Eq for ResourceRc<T> {}
 
 impl<T> Clone for ResourceRc<T> {
   fn clone(&self) -> ResourceRc<T> {
@@ -111,19 +125,19 @@ pub enum VertexAttributeFormat {
 impl VertexAttributeFormat {
   pub fn to_wgpu(&self) -> wgpu::VertexFormat {
     match self {
-      VertexAttributeFormat::Float4 => wgpu::VertexFormat::Float4,
-      VertexAttributeFormat::Float3 => wgpu::VertexFormat::Float3,
-      VertexAttributeFormat::Float2 => wgpu::VertexFormat::Float2,
-      VertexAttributeFormat::Float => wgpu::VertexFormat::Float,
-      VertexAttributeFormat::UInt4 => wgpu::VertexFormat::Uint4,
-      VertexAttributeFormat::UInt3 => wgpu::VertexFormat::Uint3,
-      VertexAttributeFormat::UInt2 => wgpu::VertexFormat::Uint2,
-      VertexAttributeFormat::UInt => wgpu::VertexFormat::Uint,
+      VertexAttributeFormat::Float4 => wgpu::VertexFormat::Float32x4,
+      VertexAttributeFormat::Float3 => wgpu::VertexFormat::Float32x3,
+      VertexAttributeFormat::Float2 => wgpu::VertexFormat::Float32x2,
+      VertexAttributeFormat::Float => wgpu::VertexFormat::Float32,
+      VertexAttributeFormat::UInt4 => wgpu::VertexFormat::Uint32x4,
+      VertexAttributeFormat::UInt3 => wgpu::VertexFormat::Uint32x3,
+      VertexAttributeFormat::UInt2 => wgpu::VertexFormat::Uint32x2,
+      VertexAttributeFormat::UInt => wgpu::VertexFormat::Uint32,
     }
   }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct VertexAttribute {
   pub name: String,
   pub offset: u64,
@@ -131,7 +145,7 @@ pub struct VertexAttribute {
   pub location: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct VertexBuffer {
   pub stride: u64,
   pub attributes: Vec<VertexAttribute>,

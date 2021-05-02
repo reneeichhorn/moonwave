@@ -26,3 +26,9 @@ pub use texture::*;
 
 mod staged_buffer;
 pub use staged_buffer::*;
+
+mod light;
+pub use light::*;
+
+mod aabb;
+pub use aabb::*;

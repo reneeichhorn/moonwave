@@ -31,20 +31,31 @@ pub enum ShaderType {
   UInt3,
   UInt2,
   UInt,
+  Struct(&'static str),
+  Array(&'static str, usize),
 }
 impl ShaderType {
   /// Returns the type name in GLSL.
-  pub fn get_glsl_type(&self) -> &'static str {
+  pub fn get_glsl_type(&self) -> String {
     match self {
-      ShaderType::Matrix4 => "mat4",
-      ShaderType::Float4 => "vec4",
-      ShaderType::Float3 => "vec3",
-      ShaderType::Float2 => "vec2",
-      ShaderType::Float => "float",
-      ShaderType::UInt4 => "uvec4",
-      ShaderType::UInt3 => "uvec3",
-      ShaderType::UInt2 => "uvec2",
-      ShaderType::UInt => "uint",
+      ShaderType::Matrix4 => "mat4".to_string(),
+      ShaderType::Float4 => "vec4".to_string(),
+      ShaderType::Float3 => "vec3".to_string(),
+      ShaderType::Float2 => "vec2".to_string(),
+      ShaderType::Float => "float".to_string(),
+      ShaderType::UInt4 => "uvec4".to_string(),
+      ShaderType::UInt3 => "uvec3".to_string(),
+      ShaderType::UInt2 => "uvec2".to_string(),
+      ShaderType::UInt => "uint".to_string(),
+      ShaderType::Struct(name) => name.to_string(),
+      ShaderType::Array(name, _size) => name.to_string(),
+    }
+  }
+
+  pub fn get_glsl_var(&self, name: &str) -> String {
+    match self {
+      ShaderType::Array(_name, size) => format!("{}[{}]", name, size),
+      _ => name.to_string(),
     }
   }
 }
@@ -75,5 +86,6 @@ pub trait UniformStruct: Sized {
   fn get_id() -> Uuid;
   fn generate_raw_u8(&self) -> Vec<u8>;
   fn generate_name() -> String;
+  fn generate_dependencies() -> Vec<(String, Vec<(String, ShaderType)>)>;
   fn generate_attributes() -> Vec<(String, ShaderType)>;
 }

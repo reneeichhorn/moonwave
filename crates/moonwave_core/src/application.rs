@@ -60,7 +60,7 @@ impl Application {
       let sc_format = adapter.get_swap_chain_preferred_format(&surface);
       let sc_desc = wgpu::SwapChainDescriptor {
         usage: wgpu::TextureUsage::RENDER_ATTACHMENT,
-        format: sc_format,
+        format: sc_format.unwrap(),
         width: win_size.width,
         height: win_size.height,
         present_mode: wgpu::PresentMode::Mailbox,
@@ -111,10 +111,9 @@ impl Application {
   pub fn add_actor<T: Spawnable>(&self, actor: T) -> ActorRc<T> {
     let mut cmd = CommandBuffer::new(&Core::get_instance().get_world().world);
     let rc = actor.spawn(None, 0, &mut cmd);
-    cmd.flush(
-      &mut Core::get_instance_mut_unstable().get_world_mut().world,
-      &mut Resources::default(),
-    );
+    Core::get_instance()
+      .get_world()
+      .add_command_buffer(cmd, false, None);
     rc
   }
 
@@ -141,13 +140,18 @@ impl Application {
           self.handle_update_size();
         }
         WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
-        /*
-        WindowEvent::KeyboardInput { input, .. } => match input {
-          _ => {}
-        },
-        */
+        WindowEvent::KeyboardInput { input, .. } => {
+          let event = KeyboardEvent {
+            key: input.virtual_keycode,
+            state: input.state,
+          };
+          Core::get_instance().get_world().publish_event(event);
+        }
         _ => {}
       },
+      Event::DeviceEvent { event, .. } => {
+        Core::get_instance().get_world().publish_event(event);
+      }
       Event::RedrawRequested(_) => match self.render() {
         Ok(_) => {}
         Err(SwapChainError::Lost) => self.handle_update_size(),
@@ -160,4 +164,12 @@ impl Application {
       _ => {}
     });
   }
+}
+
+pub use winit::event::{DeviceEvent, ElementState, VirtualKeyCode};
+
+#[derive(Clone)]
+pub struct KeyboardEvent {
+  pub key: Option<VirtualKeyCode>,
+  pub state: ElementState,
 }

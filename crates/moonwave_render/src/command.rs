@@ -163,6 +163,8 @@ pub struct RenderPassCommandEncoder<'a> {
 
 impl<'a> Drop for RenderPassCommandEncoder<'a> {
   fn drop(&mut self) {
+    optick::event!("FrameGraph::RenderPassEncoder::drop");
+
     let outputs = self
       .builder
       .outputs
@@ -177,9 +179,9 @@ impl<'a> Drop for RenderPassCommandEncoder<'a> {
       label: Some(self.builder.name.as_str()),
       color_attachments: &outputs
         .iter()
-        .map(|output| wgpu::RenderPassColorAttachmentDescriptor {
+        .map(|output| wgpu::RenderPassColorAttachment {
           resolve_target: None,
-          attachment: &*output.0,
+          view: &*output.0,
           ops: wgpu::Operations {
             store: true,
             load: wgpu::LoadOp::Clear(get_wgpu_color_rgb(output.1)),
@@ -187,8 +189,8 @@ impl<'a> Drop for RenderPassCommandEncoder<'a> {
         })
         .collect::<Vec<_>>(),
       depth_stencil_attachment: depth.as_ref().map(|depth| {
-        wgpu::RenderPassDepthStencilAttachmentDescriptor {
-          attachment: &*depth,
+        wgpu::RenderPassDepthStencilAttachment {
+          view: &*depth,
           depth_ops: Some(wgpu::Operations {
             store: true,
             load: wgpu::LoadOp::Clear(1.0),
@@ -199,20 +201,26 @@ impl<'a> Drop for RenderPassCommandEncoder<'a> {
     });
 
     // Execute commands.
-    for command in self.commands.iter() {
-      match command {
-        RenderPassCommand::SetRenderPipeline(pipeline) => rp.set_pipeline(pipeline.get_raw()),
-        RenderPassCommand::SetBindGroup(binding, bind) => {
-          rp.set_bind_group(*binding, bind.get_raw(), &[])
+    {
+      optick::event!("FrameGraph::RenderPassEncoder::execute_commands");
+      for command in self.commands.iter() {
+        match command {
+          RenderPassCommand::SetRenderPipeline(pipeline) => rp.set_pipeline(pipeline.get_raw()),
+          RenderPassCommand::SetBindGroup(binding, bind) => {
+            rp.set_bind_group(*binding, bind.get_raw(), &[])
+          }
+          RenderPassCommand::SetVertexBuffer(buffer) => {
+            rp.set_vertex_buffer(0, buffer.get_raw().slice(0..))
+          }
+          RenderPassCommand::SetIndexBuffer(format, buffer) => {
+            rp.set_index_buffer(buffer.get_raw().slice(0..), *format)
+          }
+          RenderPassCommand::RenderIndexed(range) => {
+            optick::event!("FrameGraph::RenderPassEncoder::draw_indexed");
+            rp.draw_indexed(range.clone(), 0, 0..1)
+          }
+          _ => {}
         }
-        RenderPassCommand::SetVertexBuffer(buffer) => {
-          rp.set_vertex_buffer(0, buffer.get_raw().slice(0..))
-        }
-        RenderPassCommand::SetIndexBuffer(format, buffer) => {
-          rp.set_index_buffer(buffer.get_raw().slice(0..), *format)
-        }
-        RenderPassCommand::RenderIndexed(range) => rp.draw_indexed(range.clone(), 0, 0..1),
-        _ => {}
       }
     }
   }
