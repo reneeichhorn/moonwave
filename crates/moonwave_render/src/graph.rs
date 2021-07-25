@@ -237,6 +237,10 @@ impl FrameGraph {
       }
       let cache = &mut self.traversed_node_cache;
 
+      // Create async executer.
+      let mut local_pool = futures::executor::LocalPool::new();
+      let local_spawner = local_pool.spawner();
+
       // Execute in levels order
       let mut all_levels = self.levels_map.keys().cloned().collect::<Vec<_>>();
       all_levels.sort_unstable();
@@ -351,8 +355,11 @@ impl FrameGraph {
           optick::event!("FrameGraph::submit_level");
           optick::tag!("level", level as u32);
           let mut buffers = Vec::with_capacity(encoder_outputs.len());
+
           for out in encoder_outputs {
-            buffers.push(out.command_buffer)
+            if let Some(buffer) = out.command_buffer {
+              buffers.push(buffer);
+            }
           }
           device_host.get_queue().submit(buffers);
         }

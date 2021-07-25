@@ -1,8 +1,13 @@
+use std::any::Any;
+use std::any::TypeId;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::sync::Arc;
 
 use generational_arena::Arena;
-use moonwave_resources::{BindGroup, VertexAttribute, VertexBuffer};
+use moonwave_resources::{VertexAttribute, VertexBuffer};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -20,6 +25,7 @@ pub struct ShaderGraph {
   color_outputs: Vec<(String, ShaderType, Index)>,
   uniforms: Vec<Uniform>,
   textures: Vec<Texture>,
+  texture_arrays: Vec<TextureArray>,
   nodes: Arena<Node>,
 }
 
@@ -32,6 +38,7 @@ impl ShaderGraph {
       vertex_attributes: Vec::new(),
       uniforms: Vec::new(),
       textures: Vec::new(),
+      texture_arrays: Vec::new(),
       vertex_output_node: None,
     }
   }
@@ -94,6 +101,21 @@ impl ShaderGraph {
       id,
       node_index,
       name: name.to_string(),
+    });
+    (node_index, id)
+  }
+
+  pub fn add_sampled_texture_array(&mut self, name: &str, size: u32) -> (Index, Uuid) {
+    let id = Uuid::new_v4();
+    let node = TextureArrayNode {
+      name: name.to_string(),
+    };
+    let node_index = self.add_node(node);
+    self.texture_arrays.push(TextureArray {
+      id,
+      node_index,
+      name: name.to_string(),
+      size,
     });
     (node_index, id)
   }
@@ -253,7 +275,7 @@ impl ShaderGraph {
     Ok(())
   }
 
-  pub fn build(&mut self, outputs: &[Index]) -> BuiltShaderGraph {
+  pub fn build(&mut self, outputs: &[Index], params: &ShaderBuildParams) -> BuiltShaderGraph {
     // Do some post processing on graph.
     for i in outputs {
       self.cleanup_passthrough(*i);
@@ -267,7 +289,7 @@ impl ShaderGraph {
     let traversed_vertex_shader = {
       optick::event!("ShaderGraph::traverse_vertex_shader");
       let mut nodes = Vec::with_capacity(MAX_NODES);
-      self.traverse(self.vertex_output_node.unwrap(), &mut nodes);
+      self.traverse(self.vertex_output_node.unwrap(), &mut nodes, params);
       Self::dedup_unordered(&nodes)
     };
 
@@ -276,7 +298,7 @@ impl ShaderGraph {
       optick::event!("ShaderGraph::traverse_fragment_shader");
       let mut nodes = Vec::with_capacity(MAX_NODES);
       for node in outputs {
-        self.traverse(*node, &mut nodes);
+        self.traverse(*node, &mut nodes, params);
       }
       Self::dedup_unordered(&nodes)
     };
@@ -311,6 +333,14 @@ impl ShaderGraph {
         if self.textures.iter().any(|t| t.node_index == *node_index) {
           continue;
         }
+        // Same for textures arrays
+        if self
+          .texture_arrays
+          .iter()
+          .any(|t| t.node_index == *node_index)
+        {
+          continue;
+        }
 
         let node = self.nodes.get(*node_index).unwrap();
         let outputs = node.node.get_outputs();
@@ -328,15 +358,23 @@ impl ShaderGraph {
     let uniforms = self
       .uniforms
       .iter()
+      .filter_map(|uniform| {
+        let in_vs = traversed_vertex_shader.contains(&uniform.node_index);
+        let in_fs = traversed_fragment_shader.contains(&uniform.node_index);
+        if !in_vs && !in_fs {
+          return None;
+        }
+        Some((in_vs, in_fs, uniform))
+      })
       .enumerate()
-      .map(|(index, uniform)| BuiltUniform {
+      .map(|(index, (in_vs, in_fs, uniform))| BuiltUniform {
         id: uniform.id,
         ty_id: uniform.ty_id,
         binding: index,
         name: uniform.name.clone(),
         attributes: uniform.attributes.clone(),
-        in_vs: traversed_vertex_shader.contains(&uniform.node_index),
-        in_fs: traversed_fragment_shader.contains(&uniform.node_index),
+        in_vs,
+        in_fs,
       })
       .collect::<Vec<_>>();
 
@@ -344,14 +382,44 @@ impl ShaderGraph {
     let textures = self
       .textures
       .iter()
+      .filter_map(|texture| {
+        let in_vs = traversed_vertex_shader.contains(&texture.node_index);
+        let in_fs = traversed_fragment_shader.contains(&texture.node_index);
+        if !in_vs && !in_fs {
+          return None;
+        }
+        Some((in_vs, in_fs, texture))
+      })
       .enumerate()
-      .map(|(index, texture)| BuiltTexture {
+      .map(|(index, (in_vs, in_fs, texture))| BuiltTexture {
         name: texture.name.clone(),
         id: texture.id,
         binding: uniforms.len() + index,
-        in_vs: traversed_vertex_shader.contains(&texture.node_index),
-        in_fs: traversed_fragment_shader.contains(&texture.node_index)
-          && !shared_nodes.contains(&texture.node_index),
+        in_vs,
+        in_fs,
+      })
+      .collect::<Vec<_>>();
+
+    // Texture
+    let texture_arrays = self
+      .texture_arrays
+      .iter()
+      .filter_map(|texture| {
+        let in_vs = traversed_vertex_shader.contains(&texture.node_index);
+        let in_fs = traversed_fragment_shader.contains(&texture.node_index);
+        if !in_vs && !in_fs {
+          return None;
+        }
+        Some((in_vs, in_fs, texture))
+      })
+      .enumerate()
+      .map(|(index, (in_vs, in_fs, texture))| BuiltTextureArray {
+        name: texture.name.clone(),
+        id: texture.id,
+        size: texture.size,
+        binding: uniforms.len() + textures.len() + index,
+        in_vs,
+        in_fs,
       })
       .collect::<Vec<_>>();
 
@@ -399,6 +467,7 @@ impl ShaderGraph {
         &mut global_code,
         &traversed_vertex_shader,
         &[],
+        &params,
       );
       for (_, name) in &shared_attributes {
         function_code += format!("vs_{} = {};\n", name, name).as_str();
@@ -425,9 +494,15 @@ impl ShaderGraph {
 
       // Shared attributes for fragment shader.
       for (index, (ty, name)) in shared_attributes.iter().enumerate() {
+        let is_flat = matches!(
+          ty,
+          ShaderType::UInt | ShaderType::UInt2 | ShaderType::UInt3 | ShaderType::UInt4
+        );
+
         fragment_shader_code += format!(
-          "layout (location = {}) in {} vs_{};\n",
+          "layout (location = {}) {} in {} vs_{};\n",
           index,
+          if is_flat { "flat" } else { "" },
           ty.get_glsl_type(),
           name
         )
@@ -466,6 +541,7 @@ impl ShaderGraph {
         &mut global_code,
         &traversed_fragment_shader,
         &vs,
+        &params,
       );
       function_code += "}\n";
 
@@ -475,6 +551,12 @@ impl ShaderGraph {
           continue;
         }
         Self::generate_texture(texture, &mut fragment_shader_code);
+      }
+      for texture in &texture_arrays {
+        if !texture.in_fs {
+          continue;
+        }
+        Self::generate_texture_array(texture, &mut fragment_shader_code);
       }
       fragment_shader_code += global_code.as_str();
 
@@ -495,6 +577,9 @@ impl ShaderGraph {
     }
     for texture in textures {
       bind_groups.push(BuiltShaderBindGroup::SampledTexture(texture));
+    }
+    for texture in texture_arrays {
+      bind_groups.push(BuiltShaderBindGroup::SampledTextureArray(texture));
     }
 
     BuiltShaderGraph {
@@ -537,12 +622,26 @@ impl ShaderGraph {
     .as_str();
   }
 
+  fn generate_texture_array(texture: &BuiltTextureArray, output: &mut String) {
+    *output += format!(
+      "layout (set = {}, binding = 0) uniform texture2D t_{}[{}];\n",
+      texture.binding, texture.name, texture.size
+    )
+    .as_str();
+    *output += format!(
+      "layout (set = {}, binding = 1) uniform sampler s_{};\n",
+      texture.binding, texture.name
+    )
+    .as_str();
+  }
+
   fn generate_code(
     &self,
     output: &mut String,
     global: &mut String,
     nodes: &[Index],
     skipped: &[Index],
+    params: &ShaderBuildParams,
   ) {
     for node_index in nodes.iter().rev() {
       if skipped.contains(node_index) {
@@ -571,7 +670,9 @@ impl ShaderGraph {
         .collect::<Vec<_>>();
 
       node.node.generate_global_code(&inputs, &outputs, global);
-      node.node.generate(&inputs, &outputs, output);
+      node
+        .node
+        .generate_with_params(&inputs, &outputs, output, params);
     }
   }
 
@@ -607,13 +708,18 @@ impl ShaderGraph {
     }
   }
 
-  fn traverse(&self, index: Index, output: &mut Vec<Index>) {
+  fn traverse(&self, index: Index, output: &mut Vec<Index>, params: &ShaderBuildParams) {
     let node = self.nodes.get(index).unwrap();
     output.push(index);
 
-    for input in &node.inputs {
+    for (index, input) in node.inputs.iter().enumerate() {
       if let Some(input) = input {
-        self.traverse(input.owner_node_index, output);
+        if !node.node.optimize_input(index, params) {
+          // Node has beem optimized out with runtime expressions and we therefore don't care about the nodes here.
+          continue;
+        }
+
+        self.traverse(input.owner_node_index, output, params);
       }
     }
   }
@@ -674,7 +780,52 @@ struct Texture {
   node_index: Index,
 }
 
+#[derive(Clone)]
+struct TextureArray {
+  id: Uuid,
+  name: String,
+  size: u32,
+  node_index: Index,
+}
+
+pub struct ShaderBuildParams {
+  params: HashMap<std::any::TypeId, Box<dyn Any>>,
+  pub hash: u64,
+}
+
+impl ShaderBuildParams {
+  pub fn new() -> Self {
+    Self {
+      params: HashMap::new(),
+      hash: 0,
+    }
+  }
+
+  pub fn add<T: Any + Hash>(&mut self, value: T) {
+    let mut hasher = DefaultHasher::default();
+    hasher.write_u64(self.hash);
+    value.hash(&mut hasher);
+    self.hash = hasher.finish();
+
+    self.params.insert(value.type_id(), Box::new(value));
+  }
+
+  pub fn get<T: Any>(&self) -> &T {
+    self
+      .params
+      .get(&TypeId::of::<T>())
+      .unwrap()
+      .downcast_ref()
+      .unwrap()
+  }
+}
+
 pub trait ShaderNode: std::fmt::Debug + Send + Sync + 'static {
+  /// Evaluates if the input is really used by this node.
+  fn optimize_input(&self, _index: usize, _params: &ShaderBuildParams) -> bool {
+    true
+  }
+
   fn get_available_stages(&self) -> (bool, bool) {
     (true, true)
   }
@@ -691,7 +842,23 @@ pub trait ShaderNode: std::fmt::Debug + Send + Sync + 'static {
     None
   }
 
-  fn generate(&self, inputs: &[Option<String>], outputs: &[Option<String>], output: &mut String);
+  fn generate_with_params(
+    &self,
+    inputs: &[Option<String>],
+    outputs: &[Option<String>],
+    output: &mut String,
+    _params: &ShaderBuildParams,
+  ) {
+    self.generate(inputs, outputs, output)
+  }
+
+  fn generate(
+    &self,
+    _inputs: &[Option<String>],
+    _outputs: &[Option<String>],
+    _output: &mut String,
+  ) {
+  }
 
   fn generate_global_code(
     &self,
@@ -875,6 +1042,70 @@ impl ShaderNode for TextureSampleNode {
 }
 
 #[derive(Debug)]
+struct TextureArrayNode {
+  name: String,
+}
+impl ShaderNode for TextureArrayNode {
+  fn get_outputs(&self) -> Vec<ShaderType> {
+    vec![ShaderType::Float]
+  }
+
+  fn generate(
+    &self,
+    _inputs: &[Option<String>],
+    _outputs: &[Option<String>],
+    _output: &mut String,
+  ) {
+  }
+
+  fn generate_global_code(
+    &self,
+    _inputs: &[Option<String>],
+    outputs: &[Option<String>],
+    output: &mut String,
+  ) {
+    *output += format!(
+      r#"
+      vec4 sample_fn_arr_{}(vec2 uv, uint index) {{
+        return texture(sampler2D(t_{}[index], s_{}), uv);
+      }}
+      "#,
+      outputs[0].as_ref().unwrap(),
+      &self.name,
+      &self.name,
+    )
+    .as_str();
+  }
+}
+
+#[derive(Debug)]
+pub struct TextureArraySampleNode;
+
+impl TextureArraySampleNode {
+  pub const INPUT_TEXTURE: usize = 0;
+  pub const INPUT_UV: usize = 1;
+  pub const INPUT_INDEX: usize = 2;
+  pub const OUTPUT_COLOR: usize = 0;
+
+  pub fn new() -> Self {
+    Self
+  }
+}
+
+impl ShaderNode for TextureArraySampleNode {
+  fn generate(&self, inputs: &[Option<String>], outputs: &[Option<String>], output: &mut String) {
+    *output += format!(
+      "vec4 {} = sample_fn_arr_{}({}, {});\n",
+      outputs[Self::OUTPUT_COLOR].as_ref().unwrap(),
+      inputs[Self::INPUT_TEXTURE].as_ref().unwrap(),
+      inputs[Self::INPUT_UV].as_ref().unwrap(),
+      inputs[Self::INPUT_INDEX].as_ref().unwrap()
+    )
+    .as_str();
+  }
+}
+
+#[derive(Debug)]
 pub struct InputPassthroughNode {
   inputs: Vec<(ShaderType, String)>,
 }
@@ -926,6 +1157,16 @@ pub struct BuiltTexture {
 }
 
 #[derive(Debug)]
+pub struct BuiltTextureArray {
+  pub name: String,
+  pub size: u32,
+  pub binding: usize,
+  pub id: Uuid,
+  pub in_vs: bool,
+  pub in_fs: bool,
+}
+
+#[derive(Debug)]
 pub struct BuiltShaderGraph {
   pub vb: VertexBuffer,
   pub vs: String,
@@ -936,6 +1177,7 @@ pub struct BuiltShaderGraph {
 #[derive(Debug)]
 pub enum BuiltShaderBindGroup {
   SampledTexture(BuiltTexture),
+  SampledTextureArray(BuiltTextureArray),
   Uniform(BuiltUniform),
 }
 

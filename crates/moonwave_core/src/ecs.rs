@@ -624,6 +624,16 @@ impl<T: Send + Sync + 'static> Clone for Reader<T> {
 }
 impl<T: Send + Sync + 'static> Copy for Reader<T> {}
 
+pub struct Writer<T: Send + Sync + 'static> {
+  pub _p: PhantomData<T>,
+}
+impl<T: Send + Sync + 'static> Clone for Writer<T> {
+  fn clone(&self) -> Writer<T> {
+    Writer { _p: PhantomData }
+  }
+}
+impl<T: Send + Sync + 'static> Copy for Writer<T> {}
+
 pub struct ActorEntry<'a> {
   pub entry: EntryRef<'a>,
 }
@@ -631,6 +641,10 @@ pub struct ActorEntry<'a> {
 impl<'a> ActorEntry<'a> {
   pub fn get<C: Send + Sync + 'static>(&self, _reader: Reader<C>) -> Option<&C> {
     self.entry.get_component::<C>().ok()
+  }
+
+  pub fn get_mut<C: Send + Sync + 'static>(&self, _reader: Writer<C>) -> Option<&mut C> {
+    unsafe { self.entry.get_component_unchecked::<C>().ok() }
   }
 }
 

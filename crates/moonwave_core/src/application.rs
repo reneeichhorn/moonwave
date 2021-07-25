@@ -10,6 +10,9 @@ use winit::{
 };
 
 pub struct Application {
+  #[cfg(feature = "renderdochost")]
+  renderdoc: renderdoc::RenderDoc<renderdoc::V110>,
+
   event_loop: Option<EventLoop<()>>,
   window: Window,
   win_size: PhysicalSize<u32>,
@@ -19,6 +22,10 @@ impl Application {
   pub fn new() -> Self {
     // Initialize core logging systems.
     init();
+
+    // Render doc support
+    #[cfg(feature = "renderdochost")]
+    let renderdoc = renderdoc::RenderDoc::new().expect("Unable to connect");
 
     // Create window
     let event_loop = EventLoop::new();
@@ -41,8 +48,12 @@ impl Application {
         .request_device(
           &wgpu::DeviceDescriptor {
             label: Some("Render Device"),
-            features: wgpu::Features::NON_FILL_POLYGON_MODE,
-            limits: wgpu::Limits::default(),
+            features: wgpu::Features::NON_FILL_POLYGON_MODE
+              | wgpu::Features::SAMPLED_TEXTURE_BINDING_ARRAY,
+            limits: wgpu::Limits {
+              max_sampled_textures_per_shader_stage: 128,
+              ..wgpu::Limits::default()
+            },
           },
           None, // Trace path
         )
@@ -73,6 +84,8 @@ impl Application {
     Core::initialize(device, queue, swap_chain, sc_desc, surface);
 
     Self {
+      #[cfg(feature = "renderdochost")]
+      renderdoc,
       event_loop: Some(event_loop),
       window,
       win_size,
@@ -124,6 +137,19 @@ impl Application {
 
   /// Starts execution of the application, will block current thread until application exits.
   pub fn run(mut self) {
+    // Execute extensions
+    Core::get_instance().before_run();
+
+    #[cfg(feature = "renderdochost")]
+    {
+      let mut rd = &mut self.renderdoc;
+      rd.set_focus_toggle_keys(&[renderdoc::InputButton::F]);
+      rd.set_capture_keys(&[renderdoc::InputButton::C]);
+      rd.set_capture_option_u32(renderdoc::CaptureOption::AllowVSync, 1);
+      rd.set_capture_option_u32(renderdoc::CaptureOption::ApiValidation, 1);
+      rd.mask_overlay_bits(renderdoc::OverlayBits::ALL, renderdoc::OverlayBits::ALL);
+    }
+
     // Build event loop.
     let event_loop = self.event_loop.take().unwrap();
 
@@ -141,10 +167,18 @@ impl Application {
         }
         WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
         WindowEvent::KeyboardInput { input, .. } => {
+          #[cfg(feature = "renderdochost")]
+          if input.virtual_keycode == Some(VirtualKeyCode::F10)
+            && input.state == ElementState::Released
+          {
+            self.renderdoc.launch_replay_ui(true, None).unwrap();
+          }
+
           let event = KeyboardEvent {
             key: input.virtual_keycode,
             state: input.state,
           };
+
           Core::get_instance().get_world().publish_event(event);
         }
         _ => {}

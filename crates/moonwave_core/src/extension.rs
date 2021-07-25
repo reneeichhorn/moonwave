@@ -1,5 +1,6 @@
 pub trait Extension: Send + Sync + 'static {
-  fn before_tick(&self);
+  fn init(&mut self) {}
+  fn before_tick(&mut self) {}
 }
 
 pub(crate) struct ExtensionHost {
@@ -17,8 +18,14 @@ impl ExtensionHost {
     self.extensions.push(Box::new(extension));
   }
 
-  pub fn before_tick(&self) {
-    for ext in &self.extensions {
+  pub fn init(&mut self) {
+    for ext in &mut self.extensions {
+      ext.init();
+    }
+  }
+
+  pub fn before_tick(&mut self) {
+    for ext in &mut self.extensions {
       ext.before_tick();
     }
   }

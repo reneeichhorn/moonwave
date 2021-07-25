@@ -12,8 +12,8 @@ use std::sync::{
 pub struct StagedBuffer<T: Sized> {
   content: Arc<RwLock<Vec<T>>>,
   is_dirty: Arc<AtomicBool>,
-  staging_buffer: ResourceRc<Buffer>,
-  buffer: ResourceRc<Buffer>,
+  pub(crate) staging_buffer: ResourceRc<Buffer>,
+  pub(crate) buffer: ResourceRc<Buffer>,
 }
 
 impl<T: Sized + Pod> StagedBuffer<T> {
@@ -55,6 +55,17 @@ impl<T: Sized + Pod> StagedBuffer<T> {
       buffer: self.buffer.clone(),
       staging_buffer: self.staging_buffer.clone(),
     }
+  }
+
+  pub fn partial_write_raw(&self, cmd: &mut CommandEncoder, offset: u64, new_data: &[u8]) {
+    cmd.write_buffer_offseted(&self.staging_buffer, &new_data, offset);
+    cmd.copy_buffer_to_buffer_offseted(
+      &self.staging_buffer,
+      offset,
+      &self.buffer,
+      offset,
+      new_data.len() as u64,
+    )
   }
 }
 

@@ -2,6 +2,7 @@ use moonwave_common::{
   bytemuck::{cast_slice, Pod, Zeroable},
   InnerSpace, Vector2, Vector3,
 };
+use moonwave_core::rayon::prelude::*;
 use moonwave_core::{Core, Itertools};
 use moonwave_resources::{Buffer, BufferUsage, IndexFormat, ResourceRc};
 use moonwave_shader::VertexStruct;
@@ -16,6 +17,13 @@ impl<T: MeshVertex, I: MeshIndex> Mesh<T, I> {
     Self {
       vertices: Vec::new(),
       indices: Vec::new(),
+    }
+  }
+
+  pub fn with_capacity(vertices: usize, indices: usize) -> Self {
+    Self {
+      vertices: Vec::with_capacity(vertices),
+      indices: Vec::with_capacity(indices),
     }
   }
 
@@ -39,6 +47,14 @@ impl<T: MeshVertex, I: MeshIndex> Mesh<T, I> {
     self.vertices.iter()
   }
 
+  pub fn par_iter_vertices(&self) -> impl ParallelIterator<Item = &T> + '_ {
+    self.vertices.par_iter()
+  }
+
+  pub fn iter_indices(&self) -> impl Iterator<Item = &I> + '_ {
+    self.indices.iter()
+  }
+
   pub fn push_vertex(&mut self, vertex: T) {
     self.vertices.push(vertex);
   }
@@ -49,6 +65,16 @@ impl<T: MeshVertex, I: MeshIndex> Mesh<T, I> {
 
   pub fn len_indices(&self) -> usize {
     self.indices.len()
+  }
+
+  pub fn len_vertices(&self) -> usize {
+    self.vertices.len()
+  }
+
+  pub fn build_vertex_buffer_data(&self) -> Vec<u8> {
+    // Build raw
+    let raw = cast_slice(&self.vertices);
+    raw.to_vec()
   }
 
   pub fn build_vertex_buffer(&self) -> ResourceRc<Buffer> {
@@ -155,7 +181,7 @@ impl<T: MeshVertexNormal + MeshVertexUV, I: MeshIndex> Mesh<T, I> {
   }
 }
 
-pub trait MeshVertex: Zeroable + Pod + VertexStruct {
+pub trait MeshVertex: Zeroable + Pod + VertexStruct + Send + Sync {
   fn get_position(&self) -> &Vector3<f32>;
   fn get_position_mut(&mut self) -> &mut Vector3<f32>;
 }

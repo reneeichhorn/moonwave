@@ -202,6 +202,7 @@ pub enum BindGroupLayoutEntryType {
   UniformBuffer,
   Sampler,
   SingleTexture,
+  ArrayTexture(usize),
 }
 
 impl BindGroupLayoutDescriptor {
@@ -258,6 +259,17 @@ impl BindGroupDescriptor {
     self
   }
 
+  pub fn add_texture_array_binding(
+    mut self,
+    binding: u32,
+    textures: Vec<ResourceRc<TextureView>>,
+  ) -> Self {
+    self
+      .entries
+      .push((binding, BindGroupEntry::TextureArray(textures)));
+    self
+  }
+
   pub fn add_sampler_binding(mut self, binding: u32, sampler: ResourceRc<Sampler>) -> Self {
     self
       .entries
@@ -269,6 +281,7 @@ impl BindGroupDescriptor {
 pub enum BindGroupEntry {
   Buffer(ResourceRc<Buffer>),
   Texture(ResourceRc<TextureView>),
+  TextureArray(Vec<ResourceRc<TextureView>>),
   Sampler(ResourceRc<Sampler>),
 }
 

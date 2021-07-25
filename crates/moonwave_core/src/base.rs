@@ -1,6 +1,10 @@
+use itertools::Itertools;
+use lazy_static::__Deref;
 use moonwave_common::Vector2;
-use moonwave_render::{DeviceHost, FrameGraph};
+use moonwave_render::{CommandEncoder, DeviceHost, FrameGraph};
+use parking_lot::Mutex;
 use std::{
+  collections::HashMap,
   num::NonZeroU32,
   sync::{
     atomic::{AtomicU64, Ordering},
@@ -26,13 +30,8 @@ use moonwave_resources::*;
 
 static mut CORE: Option<Core> = None;
 
-pub struct GPResources {
-  // A bind group used for simple single texture binding.
-  pub sampled_texture_bind_group_layout: ResourceRc<BindGroupLayout>,
-}
-
 pub struct Core {
-  device: Device,
+  pub(crate) device: Device,
   queue: Queue,
   swap_chain: SwapChain,
   sc_desc: SwapChainDescriptor,
@@ -71,7 +70,7 @@ impl Core {
       resources: ResourceStorage::new(),
       extension_host: RwLock::new(ExtensionHost::new()),
       service_locator: ServiceLocator::new(),
-      execution: Execution::new(6),
+      execution: Execution::new(8),
       world: World::new(),
     }
   }
@@ -100,6 +99,7 @@ impl Core {
     unsafe {
       CORE.as_mut().unwrap().gp_resources = Some(GPResources {
         sampled_texture_bind_group_layout,
+        sampled_texture_array_bind_group_layout: Mutex::new(HashMap::new()),
       });
       CORE.as_mut().unwrap().graph = Some(FrameGraph::new(PresentToScreen::new()));
     }
@@ -138,6 +138,12 @@ impl Core {
     Vector2::new(self.sc_desc.width, self.sc_desc.height)
   }
 
+  pub(crate) fn before_run(&self) {
+    optick::event!("Core::extensions::init");
+    let mut ext_host = self.extension_host.write().unwrap();
+    ext_host.init();
+  }
+
   pub(crate) fn frame(&mut self) -> Result<(), SwapChainError> {
     // Timing
     let time = Instant::now();
@@ -151,7 +157,7 @@ impl Core {
     // Execute extensions
     {
       optick::event!("Core::extensions::before_tick");
-      let ext_host = self.extension_host.read().unwrap();
+      let mut ext_host = self.extension_host.write().unwrap();
       ext_host.before_tick();
     }
 
@@ -305,6 +311,68 @@ impl Core {
     self.resources.create_proxy(raw)
   }
 
+  pub fn exec_with_encoder<'a, F: FnOnce(&mut CommandEncoder<'a>)>(&'a self, f: F) {
+    let mut encoder = CommandEncoder::new(&self.device, "withEncoderFunction");
+    f(&mut encoder);
+    let out = encoder.finish();
+    self.queue.submit(out.command_buffer);
+  }
+
+  pub fn upload_texture(
+    &self,
+    texture: ResourceRc<Texture>,
+    usage: TextureUsage,
+    format: TextureFormat,
+    size: Vector2<u32>,
+    buffer: &[u8],
+    bytes_per_row: usize,
+  ) {
+    // Fill texture
+    self.queue.write_texture(
+      wgpu::ImageCopyTexture {
+        texture: &*texture.get_raw(),
+        mip_level: 0,
+        origin: wgpu::Origin3d::ZERO,
+      },
+      buffer,
+      wgpu::ImageDataLayout {
+        bytes_per_row: NonZeroU32::new(bytes_per_row as u32),
+        offset: 0,
+        rows_per_image: NonZeroU32::new(size.y),
+      },
+      wgpu::Extent3d {
+        width: size.x,
+        height: size.y,
+        depth_or_array_layers: 1,
+      },
+    );
+
+    // Calculate mips
+    let highest_size = size.x.max(size.y);
+    let mips = (highest_size as f32).log2().floor() as u32;
+
+    // Generate mips and submit write.
+    let desc = wgpu::TextureDescriptor {
+      label: None,
+      mip_level_count: mips + 1,
+      sample_count: 1,
+      dimension: wgpu::TextureDimension::D2,
+      size: wgpu::Extent3d {
+        width: size.x,
+        height: size.y,
+        depth_or_array_layers: 1,
+      },
+      usage: wgpu::TextureUsage::COPY_DST | wgpu::TextureUsage::RENDER_ATTACHMENT | usage,
+      format,
+    };
+    let mut encoder = self.device.create_command_encoder(&Default::default());
+    self
+      .mip_generator
+      .generate(&self.device, &mut encoder, &*texture.get_raw(), &desc)
+      .unwrap();
+    self.queue.submit(std::iter::once(encoder.finish()));
+  }
+
   pub fn create_inited_sampled_texture(
     &self,
     label: Option<&str>,
@@ -446,7 +514,12 @@ impl Core {
       .iter()
       .map(|entry| wgpu::BindGroupLayoutEntry {
         binding: entry.binding,
-        count: None,
+        count: match entry.ty {
+          BindGroupLayoutEntryType::ArrayTexture(size) => {
+            Some(NonZeroU32::new(size as u32).unwrap())
+          }
+          _ => None,
+        },
         visibility: wgpu::ShaderStage::all(),
         ty: match entry.ty {
           BindGroupLayoutEntryType::UniformBuffer => wgpu::BindingType::Buffer {
@@ -462,6 +535,11 @@ impl Core {
             multisampled: false,
             sample_type: wgpu::TextureSampleType::Float { filterable: false },
             view_dimension: wgpu::TextureViewDimension::D2,
+          },
+          BindGroupLayoutEntryType::ArrayTexture(_) => wgpu::BindingType::Texture {
+            multisampled: false,
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2Array,
           },
         },
       })
@@ -511,24 +589,43 @@ impl Core {
     optick::event!("Core::create_bind_group");
 
     let raw = {
-      // Create bind group entry
-      let wgpu_entries = desc.entries.iter().map(|(binding, entry)| {
-        (
-          *binding,
-          match entry {
-            BindGroupEntry::Buffer(buffer) => wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-              buffer: buffer.get_raw(),
-              offset: 0,
-              size: None,
-            }),
-            BindGroupEntry::Texture(texture) => {
-              wgpu::BindingResource::TextureView(texture.get_raw())
-            }
-            BindGroupEntry::Sampler(sampler) => wgpu::BindingResource::Sampler(sampler.get_raw()),
-          },
-        )
-      });
+      let views_raw = Vec::new();
 
+      // Validate to ensure unsafe block below is valid
+      std::assert!(
+        desc
+          .entries
+          .iter()
+          .filter(|(_, entry)| matches!(entry, BindGroupEntry::TextureArray(_)))
+          .collect_vec()
+          .len()
+          <= 1
+      );
+
+      // Create bind group entry
+      let mut wgpu_entries = Vec::with_capacity(desc.entries.len());
+      for (binding, entry) in &desc.entries {
+        let raw_entry = match entry {
+          BindGroupEntry::Buffer(buffer) => wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+            buffer: buffer.get_raw(),
+            offset: 0,
+            size: None,
+          }),
+          BindGroupEntry::Texture(texture) => wgpu::BindingResource::TextureView(texture.get_raw()),
+          BindGroupEntry::TextureArray(textures) => {
+            unsafe {
+              let ptr = &views_raw as *const Vec<_>;
+              let views_raw = ptr as *mut Vec<_>;
+              (*views_raw).extend(textures.iter().map(|t| t.get_raw()));
+            }
+            wgpu::BindingResource::TextureViewArray(&views_raw)
+          }
+          BindGroupEntry::Sampler(sampler) => wgpu::BindingResource::Sampler(sampler.get_raw()),
+        };
+        wgpu_entries.push((*binding, raw_entry));
+      }
+
+      // Bind group device
       self.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &*desc.layout.get_raw(),
@@ -645,6 +742,7 @@ impl Core {
     optick::event!("Core::create_shader");
     let mut compiler = Compiler::new().unwrap();
 
+    //println!("=============\n{}\n=========\n", source);
     // Compile to spir-v
     let spirv = compiler
       .compile_into_spirv(source, kind, name, "main", None)
@@ -671,6 +769,32 @@ impl Core {
 
     // Create proxy
     Ok(self.resources.create_proxy(module))
+  }
+}
+
+pub struct GPResources {
+  /// A bind group used for simple single texture binding.
+  pub sampled_texture_bind_group_layout: ResourceRc<BindGroupLayout>,
+  /// A bind group used for array texture binding
+  pub sampled_texture_array_bind_group_layout: Mutex<HashMap<usize, ResourceRc<BindGroupLayout>>>,
+}
+
+impl GPResources {
+  pub fn get_sampled_texture_array_bind_group_layout(
+    &self,
+    size: usize,
+  ) -> ResourceRc<BindGroupLayout> {
+    let mut cache = self.sampled_texture_array_bind_group_layout.lock();
+    if let Some(layout) = cache.get(&size) {
+      return layout.clone();
+    }
+
+    let bind_group_layout_desc = BindGroupLayoutDescriptor::new()
+      .add_entry(0, BindGroupLayoutEntryType::ArrayTexture(size))
+      .add_entry(1, BindGroupLayoutEntryType::Sampler);
+    let bind_group_layout = Core::get_instance().create_bind_group_layout(bind_group_layout_desc);
+    cache.insert(size, bind_group_layout.clone());
+    bind_group_layout
   }
 }
 

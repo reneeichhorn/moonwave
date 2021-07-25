@@ -6,8 +6,8 @@ pub use uniform::*;
 mod camera;
 pub use camera::*;
 
-mod position;
-pub use position::*;
+mod transform;
+pub use transform::*;
 
 mod mesh;
 pub use mesh::*;
@@ -32,3 +32,11 @@ pub use light::*;
 
 mod aabb;
 pub use aabb::*;
+
+pub mod imd;
+
+pub mod texture_array;
+
+pub mod memory;
+
+pub mod opt;

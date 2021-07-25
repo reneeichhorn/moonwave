@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2018"
 
 [dependencies]
+moonwave_dylib = { path = "./crates/moonwave_dylib", optional = true}
 moonwave_common = { path = "./crates/moonwave_common" }
 moonwave_core = { path = "./crates/moonwave_core" }
 moonwave_shader = { path = "./crates/moonwave_shader" }
@@ -12,8 +13,13 @@ moonwave_scene = { path = "./crates/moonwave_scene" }
 moonwave_resources = { path = "./crates/moonwave_resources" }
 moonwave_ui = { path = "./crates/moonwave_ui" }
 
+[features]
+dynamic = ["moonwave_dylib"]
+renderdoc = ["moonwave_core/renderdochost"]
+
 [workspace]
 members = [
+  "crates/moonwave_dylib",
   "crates/moonwave_common",
   "crates/moonwave_scene",
   "crates/moonwave_core",

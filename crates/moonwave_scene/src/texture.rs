@@ -11,13 +11,11 @@ pub enum TextureCodec {
   DDS,
 }
 
-pub fn create_static_texture(
+pub fn create_raw_texture_data(
   decoder: TextureCodec,
   data: &[u8],
-) -> Result<SampledTexture, TextureReadError> {
-  optick::event!("scene::texture::create_static_texture");
-
-  let (width, height, buffer, format, row_size) = match decoder {
+) -> Result<(u32, u32, Vec<u8>, TextureFormat, usize), TextureReadError> {
+  Ok(match decoder {
     TextureCodec::DDS => {
       // Parse dds.
       let mut cursor = Cursor::new(data);
@@ -54,7 +52,16 @@ pub fn create_static_texture(
         actual_row_size,
       )
     }
-  };
+  })
+}
+
+pub fn create_static_texture(
+  decoder: TextureCodec,
+  data: &[u8],
+) -> Result<SampledTexture, TextureReadError> {
+  optick::event!("scene::texture::create_static_texture");
+
+  let (width, height, buffer, format, row_size) = create_raw_texture_data(decoder, data)?;
 
   let texture = Core::get_instance().create_inited_sampled_texture(
     None,

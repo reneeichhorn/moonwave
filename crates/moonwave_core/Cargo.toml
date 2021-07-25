@@ -4,6 +4,9 @@ version = "0.1.0"
 authors = ["Rene Eichhorn <rene.eichhorn1@gmail.com>"]
 edition = "2018"
 
+[features]
+renderdochost =  ["renderdoc"]
+
 [dependencies]
 log = { version = "0.4", features = ["std"] }
 lazy_static = "1.4"
@@ -31,5 +34,8 @@ generational-arena = "0.2"
 owning_ref = "0.4.1"
 async-trait = "0.1"
 once_cell = "1.5"
+wgpu_glyph = { git = "https://github.com/agausmann/wgpu_glyph", rev = "b4f2e9ad7bd661aabb8d6b02c9bfbb8e34e699b1"}
 backtrace = "0.3"
 wgpu-mipmap = { path = "../thirdparty/wgpu-mipmap" }
+ab_glyph = "0.2"
+renderdoc = { version = "0.10", optional = true }

@@ -7,9 +7,9 @@ use crate::Uniform;
 
 #[uniform]
 pub struct CameraUniform {
-  projection: Matrix4<f32>,
-  view: Matrix4<f32>,
-  projection_view: Matrix4<f32>,
+  pub(crate) projection: Matrix4<f32>,
+  pub(crate) view: Matrix4<f32>,
+  pub(crate) projection_view: Matrix4<f32>,
   position: Vector3<f32>,
 }
 

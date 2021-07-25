@@ -20,7 +20,7 @@ struct PresentToScreenResources {
 
 impl PresentToScreen {
   pub const INPUT_TEXTURE: usize = 0;
-  pub const INPUT_TEXTURE_UI: usize = 1;
+  pub const INPUT_TEXTURE_UI: usize = 2;
 
   pub fn new() -> Self {
     let _ = PRESENT_TO_SCREEN_PROGRAM.get_or_init(|| {

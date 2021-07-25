@@ -86,7 +86,7 @@ impl RenderResources {
       graph.connect(mul, Multiply::OUTPUT, vertex_out, 0).unwrap();
 
       // Build shader
-      Material::new(graph).build()
+      Material::new(graph).build(&ShaderBuildParams::new())
     };
 
     // Build pipeline
@@ -139,7 +139,7 @@ impl UIExtension {
 }
 
 impl Extension for UIExtension {
-  fn before_tick(&self) {
+  fn before_tick(&mut self) {
     optick::event!("moonwave_ui::UIExtension::before_frame");
 
     // Build or update resources

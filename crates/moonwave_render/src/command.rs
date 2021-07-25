@@ -8,15 +8,37 @@ use std::{
 use futures::Future;
 use moonwave_common::*;
 use moonwave_resources::*;
-use wgpu::util::RenderEncoder;
 
 pub struct CommandEncoderOutput {
-  pub(crate) command_buffer: wgpu::CommandBuffer,
+  pub command_buffer: Option<wgpu::CommandBuffer>,
 }
 impl CommandEncoderOutput {
   pub fn from_raw(buffer: wgpu::CommandBuffer) -> Self {
     Self {
-      command_buffer: buffer,
+      command_buffer: Some(buffer),
+    }
+  }
+  pub fn empty() -> Self {
+    Self {
+      command_buffer: None,
+    }
+  }
+}
+
+// Since this is executed multithreaded anyway we simply block the current thread until its ready.
+// When the mapping is not done yet we poll the device that will continue the process on GPU.
+pub fn execute_wgpu_async(device: &wgpu::Device, fut: impl Future<Output = ()>) {
+  // Since this is executed multithreaded anyway we simply block the current thread until its ready.
+  // When the mapping is not done yet we poll the device that will continue the process on GPU.
+  let waker = waker_fn(|| {});
+  let mut ctx = std::task::Context::from_waker(&waker);
+  let mut box_fut = Box::pin(fut);
+  loop {
+    match box_fut.as_mut().poll(&mut ctx) {
+      std::task::Poll::Ready(output) => return output,
+      std::task::Poll::Pending => {
+        device.poll(wgpu::Maintain::Poll);
+      }
     }
   }
 }
@@ -34,14 +56,21 @@ impl<'a> CommandEncoder<'a> {
     Self { encoder, device }
   }
 
-  pub fn write_buffer(&mut self, buffer: &ResourceRc<Buffer>, data: &[u8]) {
-    optick::event!("CommandEncoder::write_buffer");
+  pub fn get_raw(&mut self) -> &mut wgpu::CommandEncoder {
+    &mut self.encoder
+  }
 
+  pub fn write_buffer(&mut self, buffer: &ResourceRc<Buffer>, data: &[u8]) {
+    self.write_buffer_offseted(buffer, data, 0)
+  }
+
+  pub fn write_buffer_offseted(&mut self, buffer: &ResourceRc<Buffer>, data: &[u8], offset: u64) {
+    optick::event!("CommandEncoder::write_buffer");
     // Create future
     let fut = async {
       let raw_buffer = buffer.get_raw();
       {
-        let slice = raw_buffer.slice(0..data.len() as u64);
+        let slice = raw_buffer.slice(offset..offset + data.len() as u64);
         slice.map_async(wgpu::MapMode::Write).await.unwrap();
         let mut writeable = slice.get_mapped_range_mut();
         writeable.clone_from_slice(data);
@@ -49,19 +78,7 @@ impl<'a> CommandEncoder<'a> {
       raw_buffer.unmap();
     };
 
-    // Since this is executed multithreaded anyway we simply block the current thread until its ready.
-    // When the mapping is not done yet we poll the device that will continue the process on GPU.
-    let waker = waker_fn(|| {});
-    let mut ctx = std::task::Context::from_waker(&waker);
-    let mut box_fut = Box::pin(fut);
-    loop {
-      match box_fut.as_mut().poll(&mut ctx) {
-        std::task::Poll::Ready(output) => return output,
-        std::task::Poll::Pending => {
-          self.device.poll(wgpu::Maintain::Poll);
-        }
-      }
-    }
+    execute_wgpu_async(self.device, fut);
   }
 
   /// Copies one buffer into another
@@ -108,7 +125,7 @@ impl<'a> CommandEncoder<'a> {
   /// Stops all recording and builds a new command buffer.
   pub fn finish(self) -> CommandEncoderOutput {
     CommandEncoderOutput {
-      command_buffer: self.encoder.finish(),
+      command_buffer: Some(self.encoder.finish()),
     }
   }
 }

@@ -2,19 +2,23 @@ use std::{collections::HashMap, hash::Hash};
 use std::{hash::Hasher, sync::Arc};
 
 use lazy_static::lazy_static;
-use moonwave_core::{debug, Core, OnceCell, ShaderKind};
+use moonwave_core::{Core, OnceCell, ShaderKind};
 use moonwave_resources::{
   BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntryType, PipelineLayout,
   PipelineLayoutDescriptor, RenderPipeline, RenderPipelineDescriptor, ResourceRc, Shader,
-  TextureFormat, VertexBuffer,
+  TextureFormat,
 };
 use moonwave_shader::{
   BuiltShaderBindGroup, BuiltShaderGraph, Construct, ConvertHomgenous, Deconstruct, Index,
-  InputPassthroughNode, Multiply, ShaderGraph, ShaderNode, ShaderType, Vector3Upgrade,
+  InputPassthroughNode, Multiply, ShaderBuildParams, ShaderGraph, ShaderNode, ShaderType,
+  Vector3Upgrade,
 };
 use parking_lot::RwLock;
 
-use crate::{CameraUniform, DirectionalLightShaderNode, LightsUniform, ModelUniform};
+use crate::{
+  CameraUniform, DirectionalLightShaderNode, LightsUniform, ShaderOptionsMeshRenderer,
+  TransformUniform,
+};
 
 lazy_static! {
   pub static ref MATERIAL_UNIFORM_LAYOUT: ResourceRc<BindGroupLayout> = {
@@ -32,20 +36,20 @@ lazy_static! {
 
 pub struct Material {
   graph: RwLock<ShaderGraph>,
-  built: RwLock<Option<Arc<BuiltMaterial>>>,
+  built: RwLock<HashMap<u64, Arc<BuiltMaterial>>>,
 }
 
 impl Material {
   pub fn new(graph: ShaderGraph) -> Self {
     Self {
       graph: RwLock::new(graph),
-      built: RwLock::new(None),
+      built: RwLock::new(HashMap::new()),
     }
   }
 
-  pub fn build(&self) -> Arc<BuiltMaterial> {
+  pub fn build(&self, params: &ShaderBuildParams) -> Arc<BuiltMaterial> {
     let mut built_cache = self.built.write();
-    if let Some(built) = &*built_cache {
+    if let Some(built) = built_cache.get(&params.hash) {
       return built.clone();
     }
 
@@ -56,7 +60,7 @@ impl Material {
       .iter()
       .map(|(_, _, index)| *index)
       .collect::<Vec<_>>();
-    let built = graph.build(&outputs);
+    let built = graph.build(&outputs, params);
 
     // Compile
     let core = Core::get_instance();
@@ -69,10 +73,15 @@ impl Material {
 
     // Create layout
     let mut desc = PipelineLayoutDescriptor::new();
+
     for group in built.bind_groups.iter() {
       let layout = match group {
         BuiltShaderBindGroup::Uniform(_) => MATERIAL_UNIFORM_LAYOUT.clone(),
         BuiltShaderBindGroup::SampledTexture(_) => MATERIAL_TEXTURE_LAYOUT.clone(),
+        BuiltShaderBindGroup::SampledTextureArray(arr) => core
+          .get_gp_resources()
+          .get_sampled_texture_array_bind_group_layout(arr.size as usize)
+          .clone(),
       };
       desc = desc.add_binding(layout);
     }
@@ -97,7 +106,7 @@ impl Material {
       layout,
       pbr_pipeline: pipeline,
     });
-    *built_cache = Some(built_material.clone());
+    built_cache.insert(params.hash, built_material.clone());
     built_material
   }
 }
@@ -160,13 +169,10 @@ impl PBRShaderNode {
 
     // Build shaders from material.
     let (_, camera_in) = graph.add_uniform::<CameraUniform>("camera");
-    let (_, model_in) = graph.add_uniform::<ModelUniform>("model");
+    let (_, model_in) = graph.add_uniform::<TransformUniform>("transform");
     let (_, lights_in) = graph.add_uniform::<LightsUniform>("lights");
 
-    let matrix_multiply = graph.add_node(Multiply::new(ShaderType::Float4));
-    let pos_multiply = graph.add_node(Multiply::new(ShaderType::Float4));
-    let world_pos_homo = graph.add_node(ConvertHomgenous::new());
-    let upgrade = graph.add_node(Vector3Upgrade {});
+    let vertex_transform = graph.add_node(VertexTransformNode {});
     let dir_light = graph.add_node(DirectionalLightShaderNode {});
     let mat_prepare = graph.add_node(MaterialPrepareNode {});
     let pixel = graph.add_node(PixelPrepareNode {});
@@ -211,17 +217,43 @@ impl PBRShaderNode {
     graph
       .connect(
         model_in,
-        ModelUniform::OUTPUT_MATRIX,
+        TransformUniform::OUTPUT_MATRIX,
         normal,
         NormalTransformNode::INPUT_MODAL_VIEW,
       )
       .unwrap();
     graph
       .connect(
-        world_pos_homo,
-        ConvertHomgenous::OUTPUT,
+        vertex_transform,
+        VertexTransformNode::OUTPUT_POSITION3,
         normal,
         NormalTransformNode::INPUT_POSITION,
+      )
+      .unwrap();
+
+    // Vertex transform
+    graph
+      .connect(
+        input_index,
+        Self::INPUT_POSITION,
+        vertex_transform,
+        VertexTransformNode::INPUT_VPOSITION,
+      )
+      .unwrap();
+    graph
+      .connect(
+        camera_in,
+        CameraUniform::OUTPUT_PROJECTION_VIEW,
+        vertex_transform,
+        VertexTransformNode::INPUT_WORLD_TRANSFORM_MATRIX,
+      )
+      .unwrap();
+    graph
+      .connect(
+        model_in,
+        TransformUniform::OUTPUT_MATRIX,
+        vertex_transform,
+        VertexTransformNode::INPUT_TRANSFORM_MATRIX,
       )
       .unwrap();
 
@@ -236,8 +268,8 @@ impl PBRShaderNode {
       .unwrap();
     graph
       .connect(
-        world_pos_homo,
-        ConvertHomgenous::OUTPUT,
+        vertex_transform,
+        VertexTransformNode::OUTPUT_POSITION3,
         mat_prepare,
         MaterialPrepareNode::INPUT_WORLD_POSITION,
       )
@@ -380,64 +412,96 @@ impl PBRShaderNode {
       .connect(alpha_color, Construct::OUTPUT, color_out, 0)
       .unwrap();
 
-    // Make position
+    /*
+    let dbg_upgrade = graph.add_node(Vector3Upgrade {});
     graph
       .connect(
         input_index,
-        Self::INPUT_POSITION,
-        upgrade,
+        Self::INPUT_VNORMAL,
+        dbg_upgrade,
         Vector3Upgrade::INPUT,
       )
       .unwrap();
+    graph
+      .connect(dbg_upgrade, Vector3Upgrade::OUTPUT, color_out, 0)
+      .unwrap();
+      */
 
+    // Make position
     graph
       .connect(
-        model_in,
-        ModelUniform::OUTPUT_MATRIX,
-        pos_multiply,
-        Multiply::INPUT_A,
+        vertex_transform,
+        VertexTransformNode::OUTPUT_POSITION,
+        vertex_out,
+        0,
       )
-      .unwrap();
-    graph
-      .connect(
-        upgrade,
-        Vector3Upgrade::OUTPUT,
-        pos_multiply,
-        Multiply::INPUT_B,
-      )
-      .unwrap();
-    graph
-      .connect(
-        pos_multiply,
-        Multiply::OUTPUT,
-        world_pos_homo,
-        ConvertHomgenous::INPUT,
-      )
-      .unwrap();
-
-    // Multiply matrices
-    graph
-      .connect(
-        camera_in,
-        CameraUniform::OUTPUT_PROJECTION_VIEW,
-        matrix_multiply,
-        Multiply::INPUT_A,
-      )
-      .unwrap();
-    graph
-      .connect(
-        pos_multiply,
-        Multiply::OUTPUT,
-        matrix_multiply,
-        Multiply::INPUT_B,
-      )
-      .unwrap();
-
-    graph
-      .connect(matrix_multiply, Multiply::OUTPUT, vertex_out, 0)
       .unwrap();
 
     (graph, input_index)
+  }
+}
+
+#[derive(Debug)]
+struct VertexTransformNode;
+impl VertexTransformNode {
+  const INPUT_TRANSFORM_MATRIX: usize = 0;
+  const INPUT_WORLD_TRANSFORM_MATRIX: usize = 1;
+  const INPUT_VPOSITION: usize = 2;
+  const OUTPUT_POSITION: usize = 0;
+  const OUTPUT_POSITION3: usize = 1;
+}
+
+impl ShaderNode for VertexTransformNode {
+  fn get_outputs(&self) -> Vec<ShaderType> {
+    vec![ShaderType::Float4, ShaderType::Float3]
+  }
+
+  fn optimize_input(&self, index: usize, params: &ShaderBuildParams) -> bool {
+    match index {
+      Self::INPUT_TRANSFORM_MATRIX => !params.get::<ShaderOptionsMeshRenderer>().no_transform,
+      _ => true,
+    }
+  }
+
+  fn generate_with_params(
+    &self,
+    inputs: &[Option<String>],
+    outputs: &[Option<String>],
+    output: &mut String,
+    params: &ShaderBuildParams,
+  ) {
+    let no_transform = params.get::<ShaderOptionsMeshRenderer>().no_transform;
+    if no_transform {
+      *output += format!(
+        r#"
+          vec4 {} = {} * vec4({}, 1.0);
+          vec3 {} = {}.xyz / {}.w;
+        "#,
+        outputs[Self::OUTPUT_POSITION].as_ref().unwrap(),
+        inputs[Self::INPUT_WORLD_TRANSFORM_MATRIX].as_ref().unwrap(),
+        inputs[Self::INPUT_VPOSITION].as_ref().unwrap(),
+        outputs[Self::OUTPUT_POSITION3].as_ref().unwrap(),
+        outputs[Self::OUTPUT_POSITION].as_ref().unwrap(),
+        outputs[Self::OUTPUT_POSITION].as_ref().unwrap(),
+      )
+      .as_str();
+      return;
+    }
+
+    *output += format!(
+      r#"
+        vec4 {} = {} * {} * vec4({}, 1.0);
+        vec3 {} = {}.xyz / {}.w;
+      "#,
+      outputs[Self::OUTPUT_POSITION].as_ref().unwrap(),
+      inputs[Self::INPUT_WORLD_TRANSFORM_MATRIX].as_ref().unwrap(),
+      inputs[Self::INPUT_TRANSFORM_MATRIX].as_ref().unwrap(),
+      inputs[Self::INPUT_VPOSITION].as_ref().unwrap(),
+      outputs[Self::OUTPUT_POSITION3].as_ref().unwrap(),
+      outputs[Self::OUTPUT_POSITION].as_ref().unwrap(),
+      outputs[Self::OUTPUT_POSITION].as_ref().unwrap(),
+    )
+    .as_str();
   }
 }
 
@@ -523,7 +587,22 @@ impl NormalTransformNode {
   const OUTPUT_BITANGENT: usize = 2;
 }
 impl ShaderNode for NormalTransformNode {
-  fn generate(&self, inputs: &[Option<String>], outputs: &[Option<String>], output: &mut String) {
+  fn optimize_input(&self, index: usize, params: &ShaderBuildParams) -> bool {
+    match index {
+      Self::INPUT_MODAL_VIEW => !params.get::<ShaderOptionsMeshRenderer>().no_transform,
+      _ => true,
+    }
+  }
+
+  fn generate_with_params(
+    &self,
+    inputs: &[Option<String>],
+    outputs: &[Option<String>],
+    output: &mut String,
+    params: &ShaderBuildParams,
+  ) {
+    let no_transform = params.get::<ShaderOptionsMeshRenderer>().no_transform;
+
     *output += format!(
       r#"
         float flipper = gl_FrontFacing ? 1.0 : -1.0;
@@ -532,7 +611,11 @@ impl ShaderNode for NormalTransformNode {
         vec3 {} = normalize(N * (flipper * {}));
         vec3 {} = normalize(N * (flipper * {}));
       "#,
-      inputs[Self::INPUT_MODAL_VIEW].as_ref().unwrap(),
+      if no_transform {
+        "mat4(1.0)"
+      } else {
+        inputs[Self::INPUT_MODAL_VIEW].as_ref().unwrap()
+      },
       inputs[Self::INPUT_CAMERA_VIEW].as_ref().unwrap(),
       outputs[Self::OUTPUT_NORMAL].as_ref().unwrap(),
       inputs[Self::INPUT_NORMAL].as_ref().unwrap(),

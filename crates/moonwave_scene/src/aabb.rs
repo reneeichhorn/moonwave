@@ -1,6 +1,6 @@
 use moonwave_common::*;
 
-use crate::{Mesh, MeshIndex, MeshVertex, Model};
+use crate::{Mesh, MeshIndex, MeshVertex, Transform};
 
 #[derive(Debug, Clone)]
 pub enum BoundingShape {
@@ -11,15 +11,19 @@ pub enum BoundingShape {
 }
 
 impl BoundingShape {
-  pub fn new<T: MeshVertex, I: MeshIndex>(mesh: &Mesh<T, I>, model: Option<&Model>) -> Self {
+  pub fn new<T: MeshVertex, I: MeshIndex>(
+    mesh: &Mesh<T, I>,
+    transform: Option<&Transform>,
+  ) -> Self {
     // Generate matrix.
-    let matrix = if let Some(model) = model {
-      let model = model.get();
-      let translation = Matrix4::from_translation(model.position);
-      let rotation = Matrix4::from_angle_x(Rad(model.rotation.x))
-        * Matrix4::from_angle_y(Rad(model.rotation.y))
-        * Matrix4::from_angle_z(Rad(model.rotation.z));
-      let scale = Matrix4::from_nonuniform_scale(model.scale.x, model.scale.y, model.scale.z);
+    let matrix = if let Some(transform) = transform {
+      let transform = transform.get();
+      let translation = Matrix4::from_translation(transform.position);
+      let rotation = Matrix4::from_angle_x(Rad(transform.rotation.x))
+        * Matrix4::from_angle_y(Rad(transform.rotation.y))
+        * Matrix4::from_angle_z(Rad(transform.rotation.z));
+      let scale =
+        Matrix4::from_nonuniform_scale(transform.scale.x, transform.scale.y, transform.scale.z);
       translation * rotation * scale
     } else {
       Matrix4::identity()

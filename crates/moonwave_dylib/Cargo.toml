@@ -1,0 +1,17 @@
+[package]
+name = "moonwave_dylib"
+version = "0.1.0"
+authors = ["Rene Eichhorn <rene.eichhorn1@gmail.com>"]
+edition = "2018"
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+moonwave_common = { path = "../moonwave_common" }
+moonwave_core = { path = "../moonwave_core" }
+moonwave_shader = { path = "../moonwave_shader" }
+moonwave_render = { path = "../moonwave_render" }
+moonwave_scene = { path = "../moonwave_scene" }
+moonwave_resources = { path = "../moonwave_resources" }
+moonwave_ui = { path = "../moonwave_ui" }

@@ -28,3 +28,8 @@ pub mod scene {
 pub mod ui {
   pub use moonwave_ui::*;
 }
+
+#[cfg(feature = "dynamic")]
+#[allow(unused_imports)]
+#[allow(clippy::single_component_path_imports)]
+use moonwave_dylib;

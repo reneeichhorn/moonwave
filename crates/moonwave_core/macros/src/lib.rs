@@ -290,11 +290,13 @@ impl Item {
                 }
                 _ => panic!("Self is not allowed in an background spawner"),
               });
+              let optick_spawn = format!("Actor::{}::spawn_bg", ident.to_string());
               register_stream.extend(quote! {
                 {
                   let core = moonwave_core::Core::get_instance();
                   let mut weak = actor_ref.get_weak();
                   core.spawn_background_task(move || {
+                    moonwave_core::optick::event!(#optick_spawn);
                     #rw
                     #[allow(clippy::unnecessary_mut_passed)]
                     #ident::#method(&mut weak, #(#cloned_params),*);
@@ -349,6 +351,7 @@ impl Item {
             ActorMethod {
               usages: vec![ComponentUsage {
                 reader: false,
+                writer: false,
                 name: get_ident_of_pat(&e.2.pat),
                 component: parse_quote! { moonwave_core::EventReceiver<#component> },
                 mutable: true,
@@ -425,6 +428,8 @@ impl Item {
           (None, None)
         };
 
+        let optick_spawn = format!("Actor::{}::spawn", ident.to_string());
+
         quote! {
           #spawn_system
 
@@ -441,6 +446,8 @@ impl Item {
               level: usize,
               cmd: &mut legion::systems::CommandBuffer,
             ) -> moonwave_core::ActorRc<Self> {
+              moonwave_core::optick::event!(#optick_spawn);
+
               // Lazily insert tick system.
               #tick_register
 
@@ -502,6 +509,7 @@ struct ActorMethod {
 struct ComponentUsage {
   mutable: bool,
   reader: bool,
+  writer: bool,
   name: syn::Ident,
   component: syn::Path,
 }
@@ -517,7 +525,7 @@ impl ComponentUsage {
   }
 
   pub fn name(&self) -> syn::Ident {
-    if self.reader {
+    if self.reader || self.writer {
       return self.name.clone();
     }
 
@@ -588,7 +596,13 @@ impl ActorMethod {
       .map(|seg| seg.ident.to_string() == "Reader")
       .unwrap_or(false);
 
-    let reader_component = if reader {
+    let writer = path
+      .segments
+      .first()
+      .map(|seg| seg.ident.to_string() == "Writer")
+      .unwrap_or(false);
+
+    let reader_component = if reader || writer {
       let p = path.segments.first().unwrap();
       match &p.arguments {
         PathArguments::AngleBracketed(angle) => {
@@ -606,8 +620,9 @@ impl ActorMethod {
 
     ComponentUsage {
       reader,
+      writer,
       name: get_ident_of_pat(pat),
-      mutable,
+      mutable: if writer { true } else { mutable },
       component: reader_component.unwrap_or_else(|| path.clone()),
     }
   }
@@ -626,6 +641,7 @@ impl ActorMethod {
     let self_usage = ComponentUsage {
       name: format_ident!("self"),
       reader: false,
+      writer: false,
       mutable: method_self
         .map(|m| m.mutability.is_some())
         .unwrap_or_default(),
@@ -678,6 +694,7 @@ impl ActorMethod {
       let mut stream = TokenStream2::new();
       ComponentUsage {
         reader: false,
+        writer: false,
         mutable: self_mutable,
         name: format_ident!("self"),
         component: inputs[0].self_usage.component.clone(),
@@ -694,12 +711,13 @@ impl ActorMethod {
       let all = [ComponentUsage {
         reader: false,
         mutable: self_mutable,
+        writer: false,
         name: format_ident!("self"),
         component: inputs[0].self_usage.component.clone(),
       }];
       let usages = all
         .iter()
-        .chain(components.iter().filter(|c| !c.reader))
+        .chain(components.iter().filter(|c| !c.reader && !c.writer))
         .map(|m| m.query_type());
 
       quote! {
@@ -711,13 +729,14 @@ impl ActorMethod {
     let names = {
       let all = [ComponentUsage {
         reader: false,
+        writer: false,
         mutable: self_mutable,
         name: format_ident!("self"),
         component: inputs[0].self_usage.component.clone(),
       }];
       let usages = all
         .iter()
-        .chain(components.iter().filter(|c| !c.reader))
+        .chain(components.iter().filter(|c| !c.reader && !c.writer))
         .map(|m| m.name());
 
       quote! {
@@ -727,11 +746,17 @@ impl ActorMethod {
 
     // Build reader/writer streams
     let reader_writer = {
-      let streams = components.iter().filter(|c| c.reader).map(|c| {
+      let streams = components.iter().filter(|c| c.reader || c.writer).map(|c| {
         let name = &c.name;
         let component = &c.component;
+        let marker_name = if c.reader {
+          format_ident!("{}", "Reader")
+        } else {
+          format_ident!("{}", "Writer")
+        };
+
         quote! {
-          let #name: Reader<#component> = Reader { _p:  std::marker::PhantomData };
+          let #name: #marker_name<#component> = #marker_name { _p:  std::marker::PhantomData };
         }
       });
       quote! {

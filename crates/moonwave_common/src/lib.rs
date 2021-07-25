@@ -1,7 +1,19 @@
 use std::f32::consts::PI;
 
-pub use cgmath::prelude::*;
-pub use cgmath::*;
+pub use cgmath::Transform as MathTransform;
+pub use cgmath::{
+  dot, frustum, ortho, perspective, point1, point2, point3, vec1, vec2, vec3, vec4,
+};
+pub use cgmath::{
+  AbsDiff, Basis2, Basis3, Decomposed, Deg, Euler, Matrix2, Matrix3, Matrix4, Ortho, Perspective,
+  PerspectiveFov, Point1, Point2, Point3, Quaternion, Rad, Relative, Ulps, Vector1, Vector2,
+  Vector3, Vector4,
+};
+pub use cgmath::{
+  AbsDiffEq, Angle, Array, BaseFloat, BaseNum, Bounded, ElementWise, EuclideanSpace, InnerSpace,
+  Matrix, MetricSpace, One, RelativeEq, Rotation, Rotation2, Rotation3, SquareMatrix, UlpsEq,
+  VectorSpace, Zero,
+};
 
 mod color;
 pub use color::*;
